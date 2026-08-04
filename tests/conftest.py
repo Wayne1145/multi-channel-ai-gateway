@@ -1,6 +1,7 @@
 import os
 import tempfile
 
+import sqlalchemy as sa
 from cryptography.fernet import Fernet
 
 with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as handle:
@@ -18,6 +19,16 @@ os.environ.update(
 import pytest
 
 from wecom_ai_gateway.db import Base, SessionLocal, engine
+
+
+@sa.event.listens_for(engine, "connect")
+def _sqlite_test_fast(dbapi_connection, connection_record):
+    # 测试专用提速：WSL 上 SQLite 逐表 fsync 极慢，关闭同步并改用内存日志。
+    # 仅对 sqlite:// 测试连接生效；生产 PostgreSQL 不受影响。
+    cursor = dbapi_connection.cursor()
+    cursor.execute("PRAGMA journal_mode=MEMORY")
+    cursor.execute("PRAGMA synchronous=OFF")
+    cursor.close()
 
 
 @pytest.fixture(autouse=True)

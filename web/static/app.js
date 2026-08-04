@@ -108,7 +108,10 @@
       $("stat-failed").textContent = stats.failed;
       $("stat-tokens").textContent = Number(stats.tokens).toLocaleString();
       renderTrend(trend);
-      $("last-updated").textContent = "更新于 " + new Date().toLocaleTimeString("zh-CN", { hour12: false });
+      const modeText = stats.single_user_mode
+        ? "单用户模式"
+        : stats.mode === "managed" ? "统一管理模式" : "用户自足模式";
+      $("last-updated").textContent = modeText + " · 更新于 " + new Date().toLocaleTimeString("zh-CN", { hour12: false });
     } catch (ex) {
       toast(ex.message, true);
     }
@@ -142,16 +145,25 @@
       const q = ($("user-search").value || "").trim().toLowerCase();
       const list = q ? rows.filter((u) => (u.id + (u.display_name || "")).toLowerCase().includes(q)) : rows;
       $("user-tbody").innerHTML = list.length
-        ? list.map((u) => `
+        ? list.map((u) => {
+          const modeVal = u.mode || "跟随平台";
+          const modeLabel = u.mode === "managed" ? "统一管理" : u.mode === "self_service" ? "自足" : "跟随平台";
+          const toggleTo = u.mode === "managed" ? "self_service" : "managed";
+          return `
           <tr>
             <td class="mono">${esc(u.id.slice(0, 8))}</td>
             <td>${esc(u.display_name || "—")}</td>
             <td class="mono">${esc(u.model || "默认")}</td>
+            <td>
+              <span class="badge">${esc(modeLabel)}</span>
+              <button class="btn btn-sm" data-mode="${u.id}" data-mode-val="${toggleTo}" title="切换用户模式">${u.mode ? "切回" : "设为统一管理"}</button>
+            </td>
+            <td><button class="btn btn-sm" data-cards="${u.id}" data-name="${esc(u.display_name || u.id)}">查看</button></td>
             <td>${u.blocked ? '<span class="badge badge-dead">已封禁</span>' : '<span class="badge badge-ok">正常</span>'}</td>
             <td class="mono small">${esc((u.created_at || "").replace("T", " ").slice(0, 19))}</td>
             <td><button class="btn btn-sm ${u.blocked ? "" : "btn-danger"}" data-block="${u.id}" data-state="${u.blocked ? "0" : "1"}">${u.blocked ? "解封" : "封禁"}</button></td>
-          </tr>`).join("")
-        : '<tr><td colspan="6" class="muted">暂无用户</td></tr>';
+          </tr>`; }).join("")
+        : '<tr><td colspan="8" class="muted">暂无用户</td></tr>';
       document.querySelectorAll("[data-block]").forEach((b) =>
         b.addEventListener("click", async () => {
           const id = b.dataset.block;
@@ -163,11 +175,49 @@
             loadUsers();
           } catch (ex) { toast(ex.message, true); }
         }));
+      document.querySelectorAll("[data-mode]").forEach((b) =>
+        b.addEventListener("click", async () => {
+          try {
+            await api(`/api/admin/users/${b.dataset.mode}/mode`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ mode: b.dataset.modeVal }),
+            });
+            toast("用户模式已更新");
+            loadUsers();
+          } catch (ex) { toast(ex.message, true); }
+        }));
+      document.querySelectorAll("[data-cards]").forEach((b) =>
+        b.addEventListener("click", () => openCards(b.dataset.cards, b.dataset.name)));
     } catch (ex) {
       toast(ex.message, true);
     }
   }
   $("user-search").addEventListener("input", () => loadUsers());
+
+  /* ---------- 角色卡元数据（管理员不可读内容） ---------- */
+  async function openCards(userId, name) {
+    try {
+      const rows = await api(`/api/admin/users/${userId}/cards`);
+      $("card-modal-title").textContent = `角色卡 · ${name}`;
+      $("card-tbody").innerHTML = rows.length
+        ? rows.map((c) => `
+          <tr>
+            <td>${esc(c.name)}</td>
+            <td class="mono">${esc(c.format)}</td>
+            <td>${c.active ? '<span class="badge badge-ok">生效</span>' : '<span class="badge">未生效</span>'}</td>
+            <td class="mono small">${esc((c.updated_at || "").replace("T", " ").slice(0, 19))}</td>
+          </tr>`).join("")
+        : '<tr><td colspan="4" class="muted">该用户还没有角色卡</td></tr>';
+      $("card-modal").classList.remove("hidden");
+    } catch (ex) {
+      toast(ex.message, true);
+    }
+  }
+  $("card-modal-close").addEventListener("click", () => $("card-modal").classList.add("hidden"));
+  $("card-modal").addEventListener("click", (e) => {
+    if (e.target === $("card-modal")) $("card-modal").classList.add("hidden");
+  });
 
   /* ---------- 消息 ---------- */
   async function loadMessages() {

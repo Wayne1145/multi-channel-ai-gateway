@@ -65,7 +65,7 @@
         </div>
         <div class="table-wrap">
           <table class="table">
-            <thead><tr><th>ID</th><th>名称</th><th>模型</th><th>状态</th><th>创建时间</th><th></th></tr></thead>
+            <thead><tr><th>ID</th><th>名称</th><th>模型</th><th>模式</th><th>角色卡</th><th>状态</th><th>创建时间</th><th></th></tr></thead>
             <tbody id="user-tbody"></tbody>
           </table>
         </div>
@@ -118,6 +118,24 @@
 </div>
 
 <div id="toast" class="toast hidden"></div>
+
+<!-- 角色卡元数据弹窗（管理端不解密内容） -->
+<div id="card-modal" class="modal-mask hidden">
+  <div class="modal">
+    <div class="modal-head">
+      <h2 id="card-modal-title">角色卡</h2>
+      <button class="btn btn-ghost" id="card-modal-close">关闭</button>
+    </div>
+    <div class="table-wrap">
+      <table class="table">
+        <thead><tr><th>名称</th><th>格式</th><th>生效</th><th>更新时间</th></tr></thead>
+        <tbody id="card-tbody"></tbody>
+      </table>
+    </div>
+    <p class="muted small modal-foot">内容加密存储，管理员无法读取。</p>
+  </div>
+</div>
+
 <script src="/static/app.js"></script>
 </body>
 </html>

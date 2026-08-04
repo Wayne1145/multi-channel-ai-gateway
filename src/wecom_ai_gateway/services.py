@@ -3,12 +3,14 @@ from datetime import UTC, datetime
 
 from sqlalchemy import func, select
 
-from .commands import execute
+from . import cards as card_service
+from .commands import execute, memory_text
 from .config import settings
 from .db import SessionLocal
 from .models import (
     ChannelIdentity,
     ChannelState,
+    CharacterCard,
     Conversation,
     Memory,
     Message,
@@ -16,8 +18,10 @@ from .models import (
     MessageStatus,
     UsageRecord,
     User,
+    UserProvider,
     UserSettings,
 )
+from .policy import get_command_decision, normalize_command
 from .providers import provider_for
 from .security import decrypt_secret, encrypt_secret, external_id_hash
 from .tasks import add_message_task
@@ -138,6 +142,27 @@ def ingest(db, item: dict) -> None:
     db.flush()
 
 
+def resolve_provider(db, user_settings: UserSettings):
+    """返回 (provider_name, base_url, api_key)。用户 BYOK 优先，否则平台默认。"""
+    provider_key = user_settings.provider_key or ""
+    if provider_key.startswith("byok:"):
+        provider = db.get(UserProvider, provider_key.split(":", 1)[1])
+        if provider and provider.api_key_encrypted:
+            try:
+                return (
+                    provider.provider_key,
+                    provider.base_url,
+                    decrypt_secret(provider.api_key_encrypted),
+                )
+            except Exception:
+                log.exception("解密用户 BYOK 密钥失败 user=%s", user_settings.user_id)
+    return (
+        settings.default_provider,
+        settings.openai_compatible_base_url,
+        settings.openai_compatible_api_key,
+    )
+
+
 async def process_message(message_id: str) -> None:
     db = SessionLocal()
     row = db.get(Message, message_id)
@@ -153,8 +178,32 @@ async def process_message(message_id: str) -> None:
     try:
         user_settings = db.get(UserSettings, row.user_id) or UserSettings(user_id=row.user_id)
         conversation = db.get(Conversation, row.conversation_id)
-        command = execute(db, row.user_id, row.content or "")
-        if command.handled:
+        text = row.content or ""
+        answer = None
+        blocked_answer = None
+        command = None
+        if text.startswith("/"):
+            decision = get_command_decision(
+                db, row.user_id, row.channel, normalize_command(text) or ""
+            )
+            if decision.allowed:
+                command = execute(db, row.user_id, text)
+            elif decision.silent_block:
+                if decision.blocked_strategy == "ignore":
+                    # 静默忽略：不回复、不转 AI，像没收到一样
+                    row.status = MessageStatus.ignored
+                    row.error = None
+                    db.commit()
+                    db.close()
+                    return
+                # redirect_to_ai：当作普通消息交给 AI
+            else:
+                blocked_answer = "该指令在当前模式下不可用。"
+        else:
+            command = execute(db, row.user_id, text)
+        if blocked_answer is not None:
+            answer = blocked_answer
+        elif command is not None and command.handled:
             answer = command.reply
         else:
             answer = await _complete_ai(db, row, conversation, user_settings)
@@ -197,7 +246,8 @@ async def process_message(message_id: str) -> None:
 
 async def _complete_ai(db, row: Message, conversation: Conversation, user_settings: UserSettings) -> str:
     # 未配置模型凭据时保持网关可用，并向用户返回明确状态，而不是制造失败任务。
-    if not settings.openai_compatible_api_key:
+    provider_name, base_url, api_key = resolve_provider(db, user_settings)
+    if not api_key:
         return settings.unconfigured_model_message
 
     start = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
@@ -228,10 +278,23 @@ async def _complete_ai(db, row: Message, conversation: Conversation, user_settin
                 select(Memory).where(Memory.user_id == row.user_id).order_by(Memory.created_at).limit(50)
             )
         )
-    system_prompt = user_settings.system_prompt or settings.default_system_prompt
+    # 角色卡注入：激活的卡内容作为人格主体，用户自定义人设作为补充
+    card_text = ""
+    if user_settings.active_card_id:
+        card = db.get(CharacterCard, user_settings.active_card_id)
+        if card and card.content_encrypted:
+            card_text = card_service.card_to_system_prompt(
+                card.format, card_service.decrypt_card_content(card.content_encrypted)
+            )
+    if card_text:
+        system_prompt = card_text
+        if user_settings.system_prompt:
+            system_prompt += "\n\n" + user_settings.system_prompt
+    else:
+        system_prompt = user_settings.system_prompt or settings.default_system_prompt
     if memories:
         system_prompt += "\n\n只在相关时参考这些用户私有记忆：\n" + "\n".join(
-            f"- {memory.content}" for memory in memories
+            f"- {memory_text(memory)}" for memory in memories
         )
     prompts = [{"role": "system", "content": system_prompt}]
     prompts.extend(
@@ -241,9 +304,8 @@ async def _complete_ai(db, row: Message, conversation: Conversation, user_settin
         }
         for message in history
     )
-    provider_name = user_settings.provider or settings.default_provider
     model = user_settings.model or settings.default_model
-    result = await provider_for(provider_name).complete(
+    result = await provider_for(provider_name, base_url, api_key).complete(
         prompts,
         model,
         user_settings.temperature if user_settings.temperature is not None else 0.7,

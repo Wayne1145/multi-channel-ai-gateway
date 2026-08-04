@@ -13,6 +13,11 @@
 - 客服账号同步锁与消息处理锁
 - PostgreSQL 数据持久化及 Alembic 迁移
 - OpenAI-compatible 模型接口；未配置 API Key 时仍可运行网关、命令系统和管理后台，并向普通消息返回维护提示
+- 双管理模式：用户自足（self_service）/ 统一管理（managed），支持按用户覆盖；`.env` 可开启全局单用户模式
+- 角色卡系统：每用户多槽位，SOUL.md（OpenClaw 标准）与 SillyTavern v2/v3 JSON 双格式，内容加密存储、管理员不可读
+- 指令策略三级覆盖（平台 → 渠道 → 用户），支持静默禁用（redirect_to_ai / ignore 两种处理）
+- 用户预设：`/preset save` 快照模型、温度、上下文、人设与角色卡，`/preset use` 一键切换
+- 长期记忆加密存储（新写入数据入库即密文）
 - 每用户独立身份、会话、模型、人设和参数
 - 私有长期记忆（默认关闭）
 - 每日 Token 配额

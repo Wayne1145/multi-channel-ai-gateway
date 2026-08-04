@@ -33,6 +33,10 @@ class Settings(BaseSettings):
     task_retry_max_seconds: int = 300
     task_lock_timeout_seconds: int = 300
     sync_lock_seconds: int = 120
+    # 平台默认运行模式：self_service（用户自足）| managed（统一管理）
+    platform_mode: str = "self_service"
+    # 全局单用户开关：true 时忽略平台/用户模式，一切指令放行（.env 手动开启）
+    single_user_mode: bool = False
 
 
 @lru_cache
