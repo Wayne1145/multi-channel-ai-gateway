@@ -91,6 +91,9 @@ uv run pytest
 uv run ruff check src tests
 ```
 
+仓库包含 `docs/ci.example.yml` 作为 GitHub Actions 模板。启用时将它复制到
+`.github/workflows/ci.yml`；执行该提交的凭据需要 GitHub Workflow 写权限。
+
 详见 [部署文档](docs/deployment.md)、[架构说明](docs/architecture.md) 和 [安全策略](SECURITY.md)。
 
 ## 微信客服限制
