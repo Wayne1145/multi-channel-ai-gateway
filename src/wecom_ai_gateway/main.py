@@ -9,15 +9,16 @@ from sqlalchemy.orm import Session
 
 from .config import settings
 from .db import session_scope
-from .models import Message, MessageStatus, UsageRecord, User, UserSettings
+from .models import Message, MessageStatus, OutboxStatus, OutboxTask, UsageRecord, User, UserSettings
 from .queueing import enqueue_sync
 from .security import verify_admin_token
+from .tasks import replay_task
 from .wecom import decrypt, parse_callback, verify_signature
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 app = FastAPI(
     title=settings.app_name,
-    version="0.1.0",
+    version="0.2.0",
     docs_url="/api/docs" if settings.app_env != "production" else None,
 )
 web = Path(__file__).resolve().parents[2] / "web"
@@ -36,7 +37,7 @@ def db_dep():
 @app.get("/health")
 def health(db: Session = Depends(db_dep)):
     db.execute(select(1))
-    return {"ok": True, "service": "wecom-ai-gateway", "version": "0.1.0"}
+    return {"ok": True, "service": "wecom-ai-gateway", "version": "0.2.0"}
 
 
 @app.get(settings.wecom_callback_path)
@@ -119,3 +120,31 @@ def messages(db: Session = Depends(db_dep), limit: int = 100):
         }
         for m in rows
     ]
+
+
+@app.get("/api/admin/tasks/dead", dependencies=[Depends(admin)])
+def dead_tasks(db: Session = Depends(db_dep), limit: int = 100):
+    rows = db.scalars(
+        select(OutboxTask)
+        .where(OutboxTask.status == OutboxStatus.dead)
+        .order_by(OutboxTask.updated_at.desc())
+        .limit(min(limit, 500))
+    )
+    return [
+        {
+            "id": task.id,
+            "type": task.task_type,
+            "attempts": task.attempts,
+            "payload": task.payload,
+            "error": task.last_error,
+            "updated_at": task.updated_at,
+        }
+        for task in rows
+    ]
+
+
+@app.post("/api/admin/tasks/{task_id}/replay", dependencies=[Depends(admin)])
+def replay_dead_task(task_id: str):
+    if not replay_task(task_id):
+        raise HTTPException(409, "task is missing or not dead")
+    return {"ok": True, "task_id": task_id}

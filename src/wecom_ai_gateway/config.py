@@ -27,6 +27,12 @@ class Settings(BaseSettings):
     request_timeout_seconds: int = 90
     user_daily_token_quota: int = 100000
     unconfigured_model_message: str = "模型服务正在配置中。命令功能仍可使用，发送 /help 查看可用设置。"
+    worker_poll_seconds: float = 2.0
+    task_max_attempts: int = 5
+    task_retry_base_seconds: int = 5
+    task_retry_max_seconds: int = 300
+    task_lock_timeout_seconds: int = 300
+    sync_lock_seconds: int = 120
 
 
 @lru_cache

@@ -13,4 +13,7 @@ def test_health():
 
 def test_admin_auth():
     assert client.get("/api/admin/stats").status_code == 401
-    assert client.get("/api/admin/stats", headers={"X-Admin-Token": "test-admin-token"}).status_code == 200
+    headers = {"X-Admin-Token": "test-admin-token"}
+    assert client.get("/api/admin/stats", headers=headers).status_code == 200
+    assert client.get("/api/admin/tasks/dead", headers=headers).status_code == 200
+    assert client.post("/api/admin/tasks/missing/replay", headers=headers).status_code == 409

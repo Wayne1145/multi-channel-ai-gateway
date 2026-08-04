@@ -32,6 +32,14 @@ class MessageStatus(str, enum.Enum):
     sent = "sent"
     failed = "failed"
     ignored = "ignored"
+    dead = "dead"
+
+
+class OutboxStatus(str, enum.Enum):
+    pending = "pending"
+    processing = "processing"
+    done = "done"
+    dead = "dead"
 
 
 class User(Base):
@@ -131,3 +139,26 @@ class AuditLog(Base):
     action: Mapped[str] = mapped_column(String(120))
     detail: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class OutboxTask(Base):
+    __tablename__ = "outbox_tasks"
+    __table_args__ = (UniqueConstraint("dedupe_key"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    task_type: Mapped[str] = mapped_column(String(40), index=True)
+    dedupe_key: Mapped[str] = mapped_column(String(255))
+    payload: Mapped[dict] = mapped_column(JSON, default=dict)
+    status: Mapped[OutboxStatus] = mapped_column(
+        Enum(OutboxStatus), default=OutboxStatus.pending, index=True
+    )
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    rerun_requested: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    available_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )
+    locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )

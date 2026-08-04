@@ -20,6 +20,7 @@ from .models import (
 )
 from .providers import provider_for
 from .security import decrypt_secret, encrypt_secret, external_id_hash
+from .tasks import add_message_task
 from .wecom import client
 
 log = logging.getLogger(__name__)
@@ -79,7 +80,8 @@ async def sync_wecom_messages(callback_token: str, open_kfid: str) -> None:
                 raise RuntimeError(f"sync_msg failed: {result.get('errcode')} {result.get('errmsg')}")
             for item in result.get("msg_list", []):
                 ingest(db, item)
-            # 先提交消息和游标，再将待处理消息放入 Redis，避免数据库事务与队列竞态。
+            # 消息、游标与待处理任务在同一数据库事务中提交。
+            # Redis 只负责唤醒 Worker；即使通知失败，定时扫描仍会处理 Outbox。
             queued_ids = [
                 message_id
                 for (message_id,) in db.execute(
@@ -89,6 +91,8 @@ async def sync_wecom_messages(callback_token: str, open_kfid: str) -> None:
                     )
                 )
             ]
+            for message_id in queued_ids:
+                add_message_task(db, message_id)
             cursor = result.get("next_cursor", cursor)
             if state:
                 state.value = cursor
@@ -96,11 +100,6 @@ async def sync_wecom_messages(callback_token: str, open_kfid: str) -> None:
                 state = ChannelState(key=state_key, value=cursor)
                 db.add(state)
             db.commit()
-            if queued_ids:
-                from .queueing import enqueue_message
-
-                for message_id in queued_ids:
-                    enqueue_message(message_id)
             if not result.get("has_more"):
                 break
     finally:
@@ -142,7 +141,11 @@ def ingest(db, item: dict) -> None:
 async def process_message(message_id: str) -> None:
     db = SessionLocal()
     row = db.get(Message, message_id)
-    if not row or row.status not in {MessageStatus.queued, MessageStatus.failed}:
+    if not row or row.status not in {
+        MessageStatus.queued,
+        MessageStatus.failed,
+        MessageStatus.processing,
+    }:
         db.close()
         return
     row.status = MessageStatus.processing
@@ -187,6 +190,7 @@ async def process_message(message_id: str) -> None:
         row.error = str(exc)[:1000]
         db.commit()
         log.exception("处理消息失败 id=%s", message_id)
+        raise
     finally:
         db.close()
 
