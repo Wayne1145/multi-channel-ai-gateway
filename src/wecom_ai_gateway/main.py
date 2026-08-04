@@ -1,4 +1,5 @@
 import logging
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
@@ -72,6 +73,29 @@ def stats(db: Session = Depends(db_dep)):
             select(func.coalesce(func.sum(UsageRecord.prompt_tokens + UsageRecord.completion_tokens), 0))
         ),
     }
+
+
+@app.get("/api/admin/usage/trend", dependencies=[Depends(admin)])
+def usage_trend(db: Session = Depends(db_dep), days: int = 7):
+    days = max(1, min(days, 90))
+    start = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=days - 1)
+    rows = db.execute(
+        select(
+            func.date(UsageRecord.created_at).label("day"),
+            func.sum(UsageRecord.prompt_tokens + UsageRecord.completion_tokens).label("tokens"),
+        )
+        .where(UsageRecord.created_at >= start)
+        .group_by(func.date(UsageRecord.created_at))
+        .order_by(func.date(UsageRecord.created_at))
+    ).all()
+    by_day = {str(r.day): int(r.tokens or 0) for r in rows}
+    return [
+        {
+            "date": (start + timedelta(days=i)).date().isoformat(),
+            "tokens": int(by_day.get((start + timedelta(days=i)).date().isoformat(), 0)),
+        }
+        for i in range(days)
+    ]
 
 
 @app.get("/api/admin/users", dependencies=[Depends(admin)])

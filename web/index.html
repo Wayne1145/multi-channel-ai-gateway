@@ -1,1 +1,123 @@
-<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>WeCom AI Gateway</title><link rel="stylesheet" href="/static/app.css"></head><body><main><header><div><span class="eyebrow">TSUKUYOMI · LOCAL INSTANCE</span><h1>WeCom AI Gateway</h1><p>独立、多用户、隐私隔离的微信客服 AI 平台</p></div><button id="connect">连接管理 API</button></header><section class="grid"><article><b id="users">—</b><span>用户</span></article><article><b id="messages">—</b><span>消息</span></article><article><b id="tokens">—</b><span>Tokens</span></article><article><b id="failed">—</b><span>失败任务</span></article></section><section class="panel"><h2>最近用户</h2><div id="user-list" class="empty">输入管理员令牌后加载；令牌仅保存在当前浏览器会话。</div></section><section class="panel"><h2>平台边界</h2><ul><li>每个微信用户拥有独立会话、人设、参数与记忆。</li><li>平台不读取 Hermes 会话或私人记忆。</li><li>原始微信标识加密存储，日志只使用平台内部 UUID。</li></ul></section></main><script src="/static/app.js"></script></body></html>
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Tsukuyomi AI Gateway · 管理后台</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+
+<!-- 登录视图 -->
+<div id="login" class="login-wrap">
+  <form id="login-form" class="login-card" autocomplete="off">
+    <div class="brand brand-lg">Tsukuyomi</div>
+    <div class="login-sub">WeCom AI Gateway · 管理后台</div>
+    <input id="token-input" type="password" class="field" placeholder="管理员令牌" required>
+    <button type="submit" class="btn btn-block" id="login-btn">进入后台</button>
+    <p class="login-hint">令牌仅保存在本浏览器会话中</p>
+    <p id="login-error" class="login-error hidden"></p>
+  </form>
+</div>
+
+<!-- 应用视图 -->
+<div id="app" class="app hidden">
+  <aside class="sidebar">
+    <div class="brand">Tsukuyomi<small>AI Gateway</small></div>
+    <nav class="nav">
+      <button class="nav-item active" data-view="dashboard">仪表盘</button>
+      <button class="nav-item" data-view="users">用户</button>
+      <button class="nav-item" data-view="messages">消息</button>
+      <button class="nav-item" data-view="tasks">死信任务</button>
+    </nav>
+    <button id="logout" class="btn btn-ghost sidebar-foot">退出登录</button>
+  </aside>
+
+  <main class="content">
+    <header class="topbar">
+      <h1 id="page-title">仪表盘</h1>
+      <div class="topbar-actions">
+        <span id="last-updated" class="muted small"></span>
+        <button id="refresh" class="btn">刷新</button>
+      </div>
+    </header>
+
+    <!-- 仪表盘 -->
+    <section id="view-dashboard" class="view">
+      <div class="stat-grid">
+        <article class="stat-card"><b id="stat-users">–</b><span>用户</span></article>
+        <article class="stat-card"><b id="stat-messages">–</b><span>消息</span></article>
+        <article class="stat-card"><b id="stat-failed">–</b><span>失败消息</span></article>
+        <article class="stat-card"><b id="stat-tokens">–</b><span>Token 用量</span></article>
+      </div>
+      <div class="card">
+        <div class="card-head"><h2>近 7 日 Token 用量</h2></div>
+        <div id="trend" class="trend"></div>
+      </div>
+    </section>
+
+    <!-- 用户 -->
+    <section id="view-users" class="view hidden">
+      <div class="card">
+        <div class="card-head">
+          <h2>用户列表</h2>
+          <input id="user-search" class="field field-sm" placeholder="搜索 ID / 名称">
+        </div>
+        <div class="table-wrap">
+          <table class="table">
+            <thead><tr><th>ID</th><th>名称</th><th>模型</th><th>状态</th><th>创建时间</th><th></th></tr></thead>
+            <tbody id="user-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- 消息 -->
+    <section id="view-messages" class="view hidden">
+      <div class="card">
+        <div class="card-head">
+          <h2>消息记录</h2>
+          <div class="filters">
+            <select id="msg-filter" class="field field-sm">
+              <option value="">全部</option>
+              <option value="inbound">入站</option>
+              <option value="outbound">出站</option>
+            </select>
+            <select id="msg-status" class="field field-sm">
+              <option value="">全部状态</option>
+              <option value="sent">sent</option>
+              <option value="queued">queued</option>
+              <option value="failed">failed</option>
+              <option value="dead">dead</option>
+              <option value="ignored">ignored</option>
+            </select>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table class="table">
+            <thead><tr><th>时间</th><th>方向</th><th>状态</th><th>内容</th></tr></thead>
+            <tbody id="msg-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- 死信任务 -->
+    <section id="view-tasks" class="view hidden">
+      <div class="card">
+        <div class="card-head"><h2>死信任务</h2></div>
+        <div class="table-wrap">
+          <table class="table">
+            <thead><tr><th>类型</th><th>尝试次数</th><th>错误</th><th>更新时间</th><th></th></tr></thead>
+            <tbody id="task-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<div id="toast" class="toast hidden"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>

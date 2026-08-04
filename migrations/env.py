@@ -1,9 +1,12 @@
 from logging.config import fileConfig
+
 from alembic import context
 from sqlalchemy import engine_from_config, pool
+
+from wecom_ai_gateway import models  # noqa: F401
 from wecom_ai_gateway.config import settings
 from wecom_ai_gateway.db import Base
-from wecom_ai_gateway import models  # noqa: F401
+
 config=context.config
 config.set_main_option("sqlalchemy.url", settings.database_url.replace("%", "%%"))
 if config.config_file_name: fileConfig(config.config_file_name)
