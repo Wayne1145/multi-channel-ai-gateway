@@ -15,6 +15,7 @@ htmlcov/
 data/
 logs/
 uploads/
+backups/
 # Editors and OS
 .idea/
 .vscode/

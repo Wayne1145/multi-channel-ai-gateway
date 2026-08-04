@@ -192,6 +192,10 @@ async def process_message(message_id: str) -> None:
 
 
 async def _complete_ai(db, row: Message, conversation: Conversation, user_settings: UserSettings) -> str:
+    # 未配置模型凭据时保持网关可用，并向用户返回明确状态，而不是制造失败任务。
+    if not settings.openai_compatible_api_key:
+        return settings.unconfigured_model_message
+
     start = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
     used = db.scalar(
         select(func.coalesce(func.sum(UsageRecord.prompt_tokens + UsageRecord.completion_tokens), 0)).where(

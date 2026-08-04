@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     openai_compatible_api_key: str = ""
     request_timeout_seconds: int = 90
     user_daily_token_quota: int = 100000
+    unconfigured_model_message: str = "模型服务正在配置中。命令功能仍可使用，发送 /help 查看可用设置。"
 
 
 @lru_cache

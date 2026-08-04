@@ -10,7 +10,7 @@
 - `sync_msg` 完整分页、按 `msgid` 幂等入库、按客服账号持久化游标
 - Redis 任务队列，API 与 AI Worker 分离
 - PostgreSQL 数据持久化及 Alembic 迁移
-- OpenAI-compatible 模型接口
+- OpenAI-compatible 模型接口；未配置 API Key 时仍可运行网关、命令系统和管理后台，并向普通消息返回维护提示
 - 每用户独立身份、会话、模型、人设和参数
 - 私有长期记忆（默认关闭）
 - 每日 Token 配额

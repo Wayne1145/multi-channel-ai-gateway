@@ -7,10 +7,10 @@ __pycache__
 .coverage
 .env
 .env.*
-!.env.example
+*.db
+*.sqlite*
 data
 logs
 uploads
-*.db
-*.sqlite*
+backups
 tests

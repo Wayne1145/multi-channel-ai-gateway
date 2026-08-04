@@ -1,7 +1,9 @@
 from unittest.mock import patch
 
-from wecom_ai_gateway.models import Message, MessageStatus
-from wecom_ai_gateway.services import ingest
+import pytest
+
+from wecom_ai_gateway.models import Conversation, Message, MessageStatus, User, UserSettings
+from wecom_ai_gateway.services import _complete_ai, ingest
 
 
 def inbound_item(msgid: str, user: str = "wmSyntheticUser") -> dict:
@@ -34,3 +36,29 @@ def test_non_customer_message_is_not_queued(db):
         ingest(db, item)
         db.commit()
     assert db.query(Message).one().status == MessageStatus.ignored
+
+
+@pytest.mark.anyio
+async def test_unconfigured_model_returns_maintenance_message(db):
+    user = User()
+    db.add(user)
+    db.flush()
+    user_settings = UserSettings(user_id=user.id)
+    conversation = Conversation(user_id=user.id)
+    db.add_all([user_settings, conversation])
+    db.flush()
+    row = Message(
+        user_id=user.id,
+        conversation_id=conversation.id,
+        channel="wecom_kf",
+        external_message_id="msg-no-api",
+        direction="inbound",
+        message_type="text",
+        content="你好",
+        status=MessageStatus.processing,
+    )
+    db.add(row)
+    db.flush()
+    with patch("wecom_ai_gateway.services.settings.openai_compatible_api_key", ""):
+        answer = await _complete_ai(db, row, conversation, user_settings)
+    assert "配置中" in answer
