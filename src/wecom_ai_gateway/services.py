@@ -79,6 +79,16 @@ async def sync_wecom_messages(callback_token: str, open_kfid: str) -> None:
                 raise RuntimeError(f"sync_msg failed: {result.get('errcode')} {result.get('errmsg')}")
             for item in result.get("msg_list", []):
                 ingest(db, item)
+            # 先提交消息和游标，再将待处理消息放入 Redis，避免数据库事务与队列竞态。
+            queued_ids = [
+                message_id
+                for (message_id,) in db.execute(
+                    select(Message.id).where(
+                        Message.status == MessageStatus.queued,
+                        Message.metadata_json["open_kfid"].as_string() == account_id,
+                    )
+                )
+            ]
             cursor = result.get("next_cursor", cursor)
             if state:
                 state.value = cursor
@@ -86,6 +96,11 @@ async def sync_wecom_messages(callback_token: str, open_kfid: str) -> None:
                 state = ChannelState(key=state_key, value=cursor)
                 db.add(state)
             db.commit()
+            if queued_ids:
+                from .queueing import enqueue_message
+
+                for message_id in queued_ids:
+                    enqueue_message(message_id)
             if not result.get("has_more"):
                 break
     finally:
@@ -122,12 +137,6 @@ def ingest(db, item: dict) -> None:
     )
     db.add(row)
     db.flush()
-    if should_reply:
-        # 先提交消息，再放入队列，避免 Worker 在事务提交前读取不到任务对象。
-        db.commit()
-        from .queueing import enqueue_message
-
-        enqueue_message(row.id)
 
 
 async def process_message(message_id: str) -> None:
