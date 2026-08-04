@@ -17,6 +17,8 @@
 - 管理 API 和轻量管理首页
 - Docker Compose / 1Panel 友好部署
 
+> 当前版本是 **0.1.0 基础 MVP**，并非最初路线图的全部功能。已实现、已验证与尚未实现的明确边界见 [项目状态与路线图](docs/project-status.md)。接入真实模型前仍需供应商联调；大规模生产使用前还需 Outbox/DLQ、发送失败事件、并发与故障测试。
+
 ## 微信命令
 
 发送 `/help` 查看命令。主要命令：
@@ -91,10 +93,11 @@ uv run pytest
 uv run ruff check src tests
 ```
 
-仓库包含 `docs/ci.example.yml` 作为 GitHub Actions 模板。启用时将它复制到
-`.github/workflows/ci.yml`；执行该提交的凭据需要 GitHub Workflow 写权限。
+## 持续集成
 
-详见 [部署文档](docs/deployment.md)、[架构说明](docs/architecture.md) 和 [安全策略](SECURITY.md)。
+仓库已启用 `.github/workflows/ci.yml`，每次 push 与 pull request 会运行 Ruff、pytest 覆盖率报告和 Docker 镜像构建。
+
+详见 [项目状态与路线图](docs/project-status.md)、[第三方依赖与参考说明](THIRD_PARTY.md)、[部署文档](docs/deployment.md)、[架构说明](docs/architecture.md) 和 [安全策略](SECURITY.md)。
 
 ## 微信客服限制
 
