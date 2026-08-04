@@ -1,0 +1,46 @@
+services:
+  api:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    command: ["sh", "-c", "alembic upgrade head && uvicorn wecom_ai_gateway.main:app --host 0.0.0.0 --port 8080"]
+    ports: ["127.0.0.1:18082:8080"]
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health',timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+  worker:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    command: ["python", "-m", "wecom_ai_gateway.worker"]
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+  postgres:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: wecom_ai
+      POSTGRES_USER: wecom
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
+    volumes: ["./data/postgres:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U wecom -d wecom_ai"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "128mb", "--maxmemory-policy", "noeviction"]
+    volumes: ["./data/redis:/data"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
