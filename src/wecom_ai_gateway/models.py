@@ -104,7 +104,7 @@ class Message(Base):
         ForeignKey("conversations.id", ondelete="SET NULL"), index=True
     )
     user_id: Mapped[str | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), index=True)
-    channel: Mapped[str] = mapped_column(String(40), default="wecom_kf")
+    channel: Mapped[str] = mapped_column(String(40), default="wecom_kf", index=True)
     external_message_id: Mapped[str] = mapped_column(String(255))
     direction: Mapped[MessageDirection] = mapped_column(Enum(MessageDirection))
     message_type: Mapped[str] = mapped_column(String(40))
@@ -254,6 +254,7 @@ class ChannelInstance(Base):
     """渠道实例：企微客服账号 / 一个扫码绑定的 ClawBot 微信 / 未来飞书应用等。"""
 
     __tablename__ = "channel_instances"
+    __table_args__ = (UniqueConstraint("channel", "instance_name", name="uq_channel_instance_name"),)
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     channel: Mapped[str] = mapped_column(String(40), index=True)
     owner_user_id: Mapped[str | None] = mapped_column(

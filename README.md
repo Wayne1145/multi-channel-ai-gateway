@@ -23,8 +23,9 @@
 - 每日 Token 配额
 - 管理 API 和轻量管理首页
 - Docker Compose / 1Panel 友好部署
+- 可选 `wechat_clawbot` 桥接：以独立实例接入个人微信 Agent；登录凭据由桥接侧保管，网关仅处理规范化消息
 
-> 当前版本是 **0.2.0 可靠任务 MVP**，并非最初路线图的全部功能。已实现、已验证与尚未实现的明确边界见 [项目状态与路线图](docs/project-status.md)。接入真实模型前仍需供应商联调；大规模生产使用前还需发送失败事件、压力与故障测试。
+> 当前版本是 **0.3.0-dev 可靠任务与多渠道基础**，并非最初路线图的全部功能。已实现、已验证与尚未实现的明确边界见 [项目状态与路线图](docs/project-status.md)。接入真实模型或个人微信桥接前仍需隔离环境联调；大规模生产使用前还需发送失败事件、压力与故障测试。
 
 ## 微信命令
 
@@ -63,7 +64,7 @@ curl http://127.0.0.1:18082/health
 https://你的域名/wecom/kf/callback
 ```
 
-将反向代理指向 `127.0.0.1:18082`。生产环境必须设置高强度的 `ADMIN_TOKEN`、`IDENTITY_HMAC_KEY` 和 `SECRET_ENCRYPTION_KEY`。
+将反向代理指向 `127.0.0.1:18082`。生产环境必须设置高强度的 `ADMIN_TOKEN`、`IDENTITY_HMAC_KEY` 和 `SECRET_ENCRYPTION_KEY`。若启用 ClawBot 桥接，还需单独设置 `CLAWBOT_BRIDGE_TOKEN`；它不得与管理员令牌复用。
 
 生成 Fernet 加密密钥：
 

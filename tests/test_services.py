@@ -2,10 +2,19 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from wecom_ai_gateway.models import ChannelIdentity, Conversation, Message, MessageStatus, User, UserSettings
+from wecom_ai_gateway.channels import ChannelMessage
+from wecom_ai_gateway.models import (
+    ChannelIdentity,
+    Conversation,
+    Message,
+    MessageStatus,
+    OutboxTask,
+    User,
+    UserSettings,
+)
 from wecom_ai_gateway.providers import CompletionResult
 from wecom_ai_gateway.security import encrypt_secret
-from wecom_ai_gateway.services import _complete_ai, ingest, process_message
+from wecom_ai_gateway.services import _complete_ai, ingest, ingest_channel_message, process_message
 
 
 def inbound_item(msgid: str, user: str = "wmSyntheticUser") -> dict:
@@ -29,6 +38,29 @@ def test_ingest_is_idempotent_and_isolated(db):
     assert len(rows) == 2
     assert len({row.user_id for row in rows}) == 2
     assert all(row.status == MessageStatus.queued for row in rows)
+
+
+def test_generic_channel_ingest_is_idempotent_and_enqueues_message_task(db):
+    incoming = ChannelMessage(
+        channel="wechat_clawbot",
+        instance_id="instance-1",
+        sender_id="wechat-user-1",
+        external_message_id="clawbot-message-1",
+        content="你好",
+        raw={"source": "bridge"},
+    )
+    first = ingest_channel_message(db, incoming)
+    second = ingest_channel_message(db, incoming)
+    db.commit()
+
+    assert first is not None
+    assert second is None
+    assert first.channel == "wechat_clawbot"
+    assert first.status == MessageStatus.queued
+    assert first.metadata_json["instance_id"] == "instance-1"
+    assert db.query(ChannelIdentity).filter_by(channel="wechat_clawbot", account_id="instance-1").count() == 1
+    assert db.query(OutboxTask).filter_by(dedupe_key=f"message:{first.id}").count() == 1
+    assert first.user_id != ""
 
 
 def test_non_customer_message_is_not_queued(db):

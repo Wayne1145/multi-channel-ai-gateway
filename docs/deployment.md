@@ -18,6 +18,18 @@ MVP 至少需要 2 核、2GB 内存和 5GB 可用磁盘。若启用文件知识�
 http://127.0.0.1:18082
 ```
 
+## ClawBot 桥接（可选）
+
+> 个人微信接入可能受平台规则、上游 Agent 稳定性及账号风险影响。请只在隔离测试账号和明确授权范围内启用；生产默认不启用。
+
+1. 将实际 ClawBot/微信 Agent 运行在独立容器或主机上，并暴露受内网保护的 HTTP 桥接服务；
+2. 在网关 `.env` 中设置 `CLAWBOT_BRIDGE_BASE_URL` 与独立的 `CLAWBOT_BRIDGE_TOKEN`；桥接地址不得携带查询参数、Cookie 或凭据；
+3. 通过管理 API 创建 `wechat_clawbot` 实例，再启动实例；
+4. 桥接服务调用 `POST /api/internal/channel-instances/{instance_id}/messages`，使用 `Authorization: Bearer <CLAWBOT_BRIDGE_TOKEN>`；
+5. 桥接服务应实现三个端点：`POST /instances/{id}/start`、`/stop`、`/messages`。出站文本字段为 `conversationId` 与 `text`。
+
+桥接令牌、扫码会话、Cookie 和个人微信凭据只允许保存在桥接服务的受保护存储中，绝不可写入网关的渠道实例配置、数据库、日志或 Git。
+
 ## 备份
 
 至少备份：

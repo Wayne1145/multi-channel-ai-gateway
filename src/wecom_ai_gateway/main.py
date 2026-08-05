@@ -10,9 +10,12 @@ from pydantic import BaseModel
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
+from .channels import ChannelMessage, registry
+from .clawbot import register_clawbot_adapter
 from .config import settings
-from .db import session_scope
+from .db import SessionLocal, session_scope
 from .models import (
+    ChannelInstance,
     CharacterCard,
     CommandPolicy,
     Message,
@@ -26,11 +29,14 @@ from .models import (
 )
 from .policy import resolve_user_mode
 from .queueing import enqueue_sync
+from .redaction import redact_error
 from .security import verify_admin_token
+from .services import ingest_channel_message
 from .tasks import replay_task
 from .wecom import decrypt, parse_callback, verify_signature
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+log = logging.getLogger(__name__)
 app = FastAPI(
     title=settings.app_name,
     version="0.3.0",
@@ -38,11 +44,21 @@ app = FastAPI(
 )
 web = Path(__file__).resolve().parents[2] / "web"
 app.mount("/static", StaticFiles(directory=web / "static"), name="static")
+register_clawbot_adapter()
 
 
 def admin(x_admin_token: str | None = Header(None)):
     if not verify_admin_token(x_admin_token):
         raise HTTPException(401, "invalid admin token")
+
+
+def bridge_auth(authorization: str | None = Header(default=None)) -> None:
+    """桥接服务只能以独立令牌写入消息，不能复用管理员令牌。"""
+    token = settings.clawbot_bridge_token
+    if not token:
+        raise HTTPException(503, "channel bridge token is not configured")
+    if authorization != f"Bearer {token}":
+        raise HTTPException(401, "invalid channel bridge token")
 
 
 def db_dep():
@@ -202,6 +218,141 @@ class PolicyIn(BaseModel):
     allowed: bool = True
     silent_block: bool = False
     blocked_strategy: Literal["redirect_to_ai", "ignore"] = "redirect_to_ai"
+
+
+class ChannelInstanceIn(BaseModel):
+    """仅保存公开实例配置；登录态和会话凭据只能由桥接服务加密写入。"""
+
+    channel: Literal["wechat_clawbot"]
+    instance_name: str
+    owner_user_id: str | None = None
+    config: dict = {}
+
+
+class ChannelMessageIn(BaseModel):
+    """桥接服务投递的规范化入站消息；端点只面向受保护的内部网络。"""
+
+    sender_id: str
+    external_message_id: str
+    message_type: str = "text"
+    content: str | None = None
+    media: list[dict] = []
+    raw: dict = {}
+
+
+def _channel_instance_view(instance: ChannelInstance) -> dict:
+    """管理端只返回非敏感元数据，绝不返回 session_encrypted/login_state 原文。"""
+    return {
+        "id": instance.id,
+        "channel": instance.channel,
+        "instance_name": instance.instance_name,
+        "owner_user_id": instance.owner_user_id,
+        "status": instance.status,
+        "config": instance.config,
+        "created_at": instance.created_at,
+        "updated_at": instance.updated_at,
+    }
+
+
+@app.get("/api/admin/channel-instances", dependencies=[Depends(admin)])
+def channel_instances(db: Session = Depends(db_dep)):
+    rows = db.scalars(select(ChannelInstance).order_by(ChannelInstance.created_at.desc()))
+    return [_channel_instance_view(instance) for instance in rows]
+
+
+@app.post("/api/admin/channel-instances", dependencies=[Depends(admin)])
+def create_channel_instance(body: ChannelInstanceIn, db: Session = Depends(db_dep)):
+    if not body.instance_name.strip():
+        raise HTTPException(400, "instance_name is required")
+    if body.owner_user_id and not db.get(User, body.owner_user_id):
+        raise HTTPException(404, "owner user not found")
+    try:
+        registry.get(body.channel)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    instance = ChannelInstance(
+        channel=body.channel,
+        instance_name=body.instance_name.strip()[:120],
+        owner_user_id=body.owner_user_id,
+        config=body.config,
+        login_state={},
+        status="offline",
+    )
+    db.add(instance)
+    db.commit()
+    db.refresh(instance)
+    return _channel_instance_view(instance)
+
+
+async def _change_channel_instance_status(instance_id: str, action: Literal["start", "stop"]) -> dict:
+    """桥接调用完成后才写状态，失败时保存可见但不含敏感信息的 error 状态。"""
+    db = SessionLocal()
+    try:
+        instance = db.get(ChannelInstance, instance_id)
+        if not instance:
+            raise HTTPException(404, "channel instance not found")
+        try:
+            adapter = registry.get(instance.channel)
+            if action == "start":
+                instance.status = "logging_in"
+                db.commit()
+                await adapter.start_instance(instance.id)
+                instance.status = "online"
+            else:
+                await adapter.stop_instance(instance.id)
+                instance.status = "offline"
+            db.commit()
+        except Exception as exc:
+            db.rollback()
+            instance = db.get(ChannelInstance, instance_id)
+            if instance:
+                instance.status = "error"
+                db.commit()
+            log.error(
+                "渠道实例操作失败 id=%s action=%s error=%s",
+                instance_id,
+                action,
+                redact_error(exc, 300),
+            )
+            raise HTTPException(502, "channel bridge operation failed") from exc
+        return _channel_instance_view(instance)
+    finally:
+        db.close()
+
+
+@app.post("/api/admin/channel-instances/{instance_id}/start", dependencies=[Depends(admin)])
+async def start_channel_instance(instance_id: str):
+    return await _change_channel_instance_status(instance_id, "start")
+
+
+@app.post("/api/admin/channel-instances/{instance_id}/stop", dependencies=[Depends(admin)])
+async def stop_channel_instance(instance_id: str):
+    return await _change_channel_instance_status(instance_id, "stop")
+
+
+@app.post("/api/internal/channel-instances/{instance_id}/messages", dependencies=[Depends(bridge_auth)])
+def receive_channel_message(instance_id: str, body: ChannelMessageIn, db: Session = Depends(db_dep)):
+    """受保护的桥接入口：复用统一身份映射与消息 Outbox，不暴露给终端用户。"""
+    instance = db.get(ChannelInstance, instance_id)
+    if not instance:
+        raise HTTPException(404, "channel instance not found")
+    if instance.status != "online":
+        raise HTTPException(409, "channel instance is not online")
+    message = ingest_channel_message(
+        db,
+        ChannelMessage(
+            channel=instance.channel,
+            instance_id=instance.id,
+            sender_id=body.sender_id,
+            external_message_id=body.external_message_id,
+            message_type=body.message_type,
+            content=body.content,
+            media=body.media,
+            raw=body.raw,
+        ),
+    )
+    db.commit()
+    return {"ok": True, "accepted": message is not None, "message_id": message.id if message else None}
 
 
 @app.get("/api/admin/mode", dependencies=[Depends(admin)])

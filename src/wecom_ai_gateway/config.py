@@ -35,6 +35,11 @@ class Settings(BaseSettings):
     task_retry_max_seconds: int = 300
     task_lock_timeout_seconds: int = 300
     sync_lock_seconds: int = 120
+    # 可选的微信 ClawBot HTTP 桥接服务。留空即不启用个人微信渠道。
+    # 此桥接地址不应携带凭据；认证令牌仅从环境变量读取，绝不落库或出现在管理 API。
+    clawbot_bridge_base_url: str = ""
+    clawbot_bridge_token: str = ""
+    clawbot_request_timeout_seconds: int = 30
     # 平台默认运行模式：self_service（用户自足）| managed（统一管理）
     platform_mode: str = "self_service"
     # 全局单用户开关：true 时忽略平台/用户模式，一切指令放行（.env 手动开启）

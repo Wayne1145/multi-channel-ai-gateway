@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 from sqlalchemy import func, select
 
 from . import cards as card_service
+from .channels import ChannelMessage, OutgoingMessage, registry
 from .commands import execute, memory_text
 from .config import settings
 from .db import SessionLocal
@@ -31,11 +32,11 @@ from .wecom import client
 log = logging.getLogger(__name__)
 
 
-def resolve_user(db, external_id: str, account_id: str) -> User:
+def resolve_user(db, external_id: str, account_id: str, channel: str = "wecom_kf") -> User:
     digest = external_id_hash(external_id)
     identity = db.scalar(
         select(ChannelIdentity).where(
-            ChannelIdentity.channel == "wecom_kf",
+            ChannelIdentity.channel == channel,
             ChannelIdentity.account_id == account_id,
             ChannelIdentity.external_id_hash == digest,
         )
@@ -48,7 +49,7 @@ def resolve_user(db, external_id: str, account_id: str) -> User:
     db.add(
         ChannelIdentity(
             user_id=user.id,
-            channel="wecom_kf",
+            channel=channel,
             account_id=account_id,
             external_id_hash=digest,
             external_id_encrypted=encrypt_secret(external_id),
@@ -109,6 +110,48 @@ async def sync_wecom_messages(callback_token: str, open_kfid: str) -> None:
                 break
     finally:
         db.close()
+
+
+def ingest_channel_message(db, incoming: ChannelMessage) -> Message | None:
+    """将任意文本渠道消息按统一身份、会话和 Outbox 语义入库。
+
+    非文本消息保留为 ignored；重复 external_message_id 不会生成第二条任务。
+    渠道适配器只需构造 ChannelMessage，不能绕过这条隔离路径。
+    """
+    if not incoming.external_message_id:
+        raise ValueError("渠道消息缺少 external_message_id")
+    exists = db.scalar(
+        select(Message.id).where(
+            Message.channel == incoming.channel,
+            Message.external_message_id == incoming.external_message_id,
+        )
+    )
+    if exists:
+        return None
+    user = resolve_user(db, incoming.sender_id, incoming.instance_id, incoming.channel)
+    conversation = active_conversation(db, user.id)
+    should_reply = incoming.message_type == "text" and bool(incoming.content) and not user.is_blocked
+    row = Message(
+        conversation_id=conversation.id,
+        user_id=user.id,
+        channel=incoming.channel,
+        external_message_id=incoming.external_message_id,
+        direction=MessageDirection.inbound,
+        message_type=incoming.message_type,
+        content=incoming.content,
+        status=MessageStatus.queued if should_reply else MessageStatus.ignored,
+        metadata_json={
+            "instance_id": incoming.instance_id,
+            "sender_id": incoming.sender_id,
+            "media": incoming.media,
+            "raw": incoming.raw,
+        },
+    )
+    db.add(row)
+    db.flush()
+    if row.status == MessageStatus.queued:
+        add_message_task(db, row.id)
+    return row
 
 
 def ingest(db, item: dict) -> None:
@@ -214,18 +257,23 @@ async def process_message(message_id: str) -> None:
         else:
             answer = await _complete_ai(db, row, conversation, user_settings)
 
+        metadata = dict(row.metadata_json or {})
+        if row.channel == "wecom_kf":
+            account_id = metadata.get("open_kfid") or settings.wecom_open_kfid
+        else:
+            account_id = metadata.get("instance_id")
+        if not account_id:
+            raise RuntimeError("入站消息缺少渠道实例标识")
         identity = db.scalar(
             select(ChannelIdentity).where(
                 ChannelIdentity.user_id == row.user_id,
-                ChannelIdentity.channel == "wecom_kf",
-                ChannelIdentity.account_id
-                == ((row.metadata_json or {}).get("open_kfid") or settings.wecom_open_kfid),
+                ChannelIdentity.channel == row.channel,
+                ChannelIdentity.account_id == account_id,
             )
         )
         if identity is None:
-            raise RuntimeError("找不到与入站客服账号匹配的用户身份")
+            raise RuntimeError("找不到与入站渠道实例匹配的用户身份")
         external_id = decrypt_secret(identity.external_id_encrypted)
-        open_kfid = (row.metadata_json or {}).get("open_kfid") or settings.wecom_open_kfid
         answer = (answer or "").strip()
         # 空回复不能作为成功结果发送。它通常来自供应商的长推理/临时空响应；
         # 抛出异常交给 Outbox 重试，避免向用户展示误导性的兜底文案。
@@ -242,12 +290,24 @@ async def process_message(message_id: str) -> None:
         row.metadata_json = metadata
         db.commit()
 
-        sent_id = await client.send_text(open_kfid, external_id, answer)
+        if row.channel == "wecom_kf":
+            sent_id = await client.send_text(account_id, external_id, answer)
+        else:
+            adapter = registry.get(row.channel)
+            sent_id = await adapter.send(
+                OutgoingMessage(
+                    channel=row.channel,
+                    instance_id=account_id,
+                    to_sender_id=external_id,
+                    text=answer,
+                    metadata={"reply_to": row.external_message_id},
+                )
+            )
         db.add(
             Message(
                 conversation_id=row.conversation_id,
                 user_id=row.user_id,
-                channel="wecom_kf",
+                channel=row.channel,
                 external_message_id=sent_id or f"local:{row.id}",
                 direction=MessageDirection.outbound,
                 message_type="text",
