@@ -3,6 +3,7 @@ import logging
 
 from .config import settings
 from .queueing import WAKE_QUEUE, redis_client
+from .redaction import redact_error
 from .services import process_message, sync_wecom_messages
 from .tasks import (
     claim_task,
@@ -10,6 +11,7 @@ from .tasks import (
     distributed_lock,
     fail_task,
     reconcile_message_tasks,
+    renew_task_lease,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -37,13 +39,36 @@ async def execute_task(task) -> None:
 async def drain_available_tasks() -> int:
     processed = 0
     while task := claim_task():
+        stop_heartbeat = asyncio.Event()
+
+        async def heartbeat(stop_event=stop_heartbeat, task_id=task.id, lease_token=task.lease_token):
+            interval = max(1, settings.task_lock_timeout_seconds // 3)
+            while not stop_event.is_set():
+                try:
+                    await asyncio.wait_for(stop_event.wait(), timeout=interval)
+                except TimeoutError:
+                    if not await asyncio.to_thread(renew_task_lease, task_id, lease_token):
+                        log.error("任务租约已丢失 id=%s", task_id)
+                        return
+
+        heartbeat_task = asyncio.create_task(heartbeat())
         try:
             await execute_task(task)
-        except Exception as exc:
-            status = fail_task(task.id, exc)
-            log.exception("任务失败 id=%s type=%s status=%s", task.id, task.task_type, status.value)
+        except Exception as exc:  # noqa: BLE001 - Worker 必须把业务异常持久化为可重试任务。
+            status = fail_task(task.id, task.lease_token, exc)
+            status_text = status.value if status is not None else "lease-lost"
+            log.error(
+                "任务失败 id=%s type=%s status=%s error=%s",
+                task.id,
+                task.task_type,
+                status_text,
+                redact_error(exc, 300),
+            )
         else:
-            complete_task(task.id)
+            complete_task(task.id, task.lease_token)
+        finally:
+            stop_heartbeat.set()
+            await heartbeat_task
         processed += 1
     return processed
 

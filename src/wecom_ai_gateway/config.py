@@ -24,7 +24,9 @@ class Settings(BaseSettings):
     default_system_prompt: str = "你是一个准确、友善且尊重隐私的人工智能助手。"
     openai_compatible_base_url: str = "https://api.deepseek.com/v1"
     openai_compatible_api_key: str = ""
-    request_timeout_seconds: int = 90
+    # 模型推理可能包含较长的思考阶段。默认 300 秒避免把正常长响应误判为失败；
+    # Worker 会持续续租任务，避免该等待期间被其他 Worker 重复领取。
+    request_timeout_seconds: int = 300
     user_daily_token_quota: int = 100000
     unconfigured_model_message: str = "模型服务正在配置中。命令功能仍可使用，发送 /help 查看可用设置。"
     worker_poll_seconds: float = 2.0

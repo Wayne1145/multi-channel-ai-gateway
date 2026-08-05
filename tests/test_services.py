@@ -1,9 +1,11 @@
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from wecom_ai_gateway.models import Conversation, Message, MessageStatus, User, UserSettings
-from wecom_ai_gateway.services import _complete_ai, ingest
+from wecom_ai_gateway.models import ChannelIdentity, Conversation, Message, MessageStatus, User, UserSettings
+from wecom_ai_gateway.providers import CompletionResult
+from wecom_ai_gateway.security import encrypt_secret
+from wecom_ai_gateway.services import _complete_ai, ingest, process_message
 
 
 def inbound_item(msgid: str, user: str = "wmSyntheticUser") -> dict:
@@ -62,3 +64,52 @@ async def test_unconfigured_model_returns_maintenance_message(db):
     with patch("wecom_ai_gateway.services.settings.openai_compatible_api_key", ""):
         answer = await _complete_ai(db, row, conversation, user_settings)
     assert "配置中" in answer
+
+
+@pytest.mark.anyio
+async def test_empty_model_reply_is_retried_instead_of_sending_fallback(db):
+    """长推理期间的空响应不能被伪装成一条成功客服回复。"""
+    user = User()
+    db.add(user)
+    db.flush()
+    user_settings = UserSettings(user_id=user.id)
+    conversation = Conversation(user_id=user.id)
+    identity = ChannelIdentity(
+        user_id=user.id,
+        channel="wecom_kf",
+        account_id="wkSyntheticAccount",
+        external_id_hash="a" * 64,
+        external_id_encrypted=encrypt_secret("external-user"),
+    )
+    db.add_all([user_settings, conversation, identity])
+    db.flush()
+    row = Message(
+        user_id=user.id,
+        conversation_id=conversation.id,
+        channel="wecom_kf",
+        external_message_id="msg-empty-model-reply",
+        direction="inbound",
+        message_type="text",
+        content="请认真想一想",
+        status=MessageStatus.queued,
+        metadata_json={"open_kfid": "wkSyntheticAccount"},
+    )
+    db.add_all([user_settings, conversation, identity, row])
+    db.commit()
+
+    provider = AsyncMock()
+    provider.complete.return_value = CompletionResult(content="")
+    send = AsyncMock()
+    with (
+        patch("wecom_ai_gateway.services.resolve_provider", return_value=("openai-compatible", "https://example.invalid/v1", "test-key")),
+        patch("wecom_ai_gateway.services.provider_for", return_value=provider),
+        patch("wecom_ai_gateway.services.client.send_text", send),
+        pytest.raises(RuntimeError, match="未生成可发送"),
+    ):
+        await process_message(row.id)
+
+    send.assert_not_awaited()
+    db.expire_all()
+    failed = db.get(Message, row.id)
+    assert failed.status == MessageStatus.failed
+    assert "暂时没有生成可发送的内容" not in (failed.error or "")

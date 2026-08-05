@@ -23,10 +23,12 @@ def test_usage_trend():
     from datetime import UTC, datetime
 
     from wecom_ai_gateway.db import SessionLocal
-    from wecom_ai_gateway.models import UsageRecord
+    from wecom_ai_gateway.models import UsageRecord, User
 
     headers = {"X-Admin-Token": "test-admin-token"}
     db = SessionLocal()
+    db.add(User(id="u1"))
+    db.flush()
     db.add(UsageRecord(user_id="u1", provider="openai-compatible", model="deepseek-chat", prompt_tokens=100, completion_tokens=50))
     db.add(UsageRecord(user_id="u1", provider="openai-compatible", model="deepseek-chat", prompt_tokens=30, completion_tokens=20))
     db.commit()

@@ -7,7 +7,16 @@ from sqlalchemy.orm import Session
 from . import cards as card_service
 from . import presets as preset_service
 from .config import settings
-from .models import CharacterCard, Conversation, Memory, Message, UsageRecord, User, UserSettings
+from .models import (
+    CharacterCard,
+    Conversation,
+    Memory,
+    Message,
+    MessageStatus,
+    UsageRecord,
+    User,
+    UserSettings,
+)
 from .policy import resolve_user_mode
 from .security import decrypt_secret, encrypt_secret
 
@@ -78,9 +87,7 @@ def execute(db: Session, user_id: str, text: str) -> CommandResult:
             "self_service": "用户自足",
             "managed": "统一管理",
         }.get(mode, mode)
-        active_card = (
-            db.get(CharacterCard, user_settings.active_card_id) if user_settings.active_card_id else None
-        )
+        active_card = _active_card(db, user_settings)
         card_text = f"角色卡：{active_card.name}" if active_card else "角色卡：无"
         provider_text = "用户自带" if (user_settings.provider_key or "").startswith("byok:") else "平台"
         return CommandResult(
@@ -117,8 +124,20 @@ def execute(db: Session, user_id: str, text: str) -> CommandResult:
         return CommandResult(True, "新的会话已经开始。")
     if cmd == "/clear":
         if len(parts) > 1 and parts[1].lower() == "confirm":
-            db.execute(delete(Message).where(Message.user_id == user_id))
-            db.execute(delete(Conversation).where(Conversation.user_id == user_id))
+            # 当前命令仍需落库并发送确认；只删除它之前的历史。
+            current = db.scalar(
+                select(Message)
+                .where(Message.user_id == user_id, Message.status == MessageStatus.processing)
+                .order_by(Message.created_at.desc())
+            )
+            message_filter = Message.user_id == user_id
+            conversation_filter = Conversation.user_id == user_id
+            if current is not None:
+                message_filter &= Message.id != current.id
+                if current.conversation_id:
+                    conversation_filter &= Conversation.id != current.conversation_id
+            db.execute(delete(Message).where(message_filter))
+            db.execute(delete(Conversation).where(conversation_filter))
             return CommandResult(True, "你的聊天记录已清除。")
         return CommandResult(True, "此操作只清除你自己的聊天记录。确认请发送 /clear confirm")
     if cmd == "/memory":
@@ -207,7 +226,12 @@ def _memory_command(
 def _active_card(db: Session, user_settings: UserSettings) -> CharacterCard | None:
     if not user_settings.active_card_id:
         return None
-    return db.get(CharacterCard, user_settings.active_card_id)
+    return db.scalar(
+        select(CharacterCard).where(
+            CharacterCard.id == user_settings.active_card_id,
+            CharacterCard.user_id == user_settings.user_id,
+        )
+    )
 
 
 def _set_active_card(db: Session, user_settings: UserSettings, card: CharacterCard) -> None:
@@ -339,7 +363,7 @@ def _preset_command(
         preset = preset_service.get_preset(db, user_id, parts[2].strip())
         if not preset:
             return CommandResult(True, "没有这个预设。")
-        preset_service.apply_snapshot(user_settings, preset.config)
+        preset_service.apply_snapshot(db, user_settings, preset.config)
         return CommandResult(True, f"预设「{preset.name}」已应用。")
     if action == "delete" and len(parts) >= 3:
         if preset_service.delete_preset(db, user_id, parts[2].strip()):

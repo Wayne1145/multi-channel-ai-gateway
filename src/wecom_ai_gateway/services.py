@@ -23,6 +23,7 @@ from .models import (
 )
 from .policy import get_command_decision, normalize_command
 from .providers import provider_for
+from .redaction import redact_error
 from .security import decrypt_secret, encrypt_secret, external_id_hash
 from .tasks import add_message_task
 from .wecom import client
@@ -146,7 +147,12 @@ def resolve_provider(db, user_settings: UserSettings):
     """返回 (provider_name, base_url, api_key)。用户 BYOK 优先，否则平台默认。"""
     provider_key = user_settings.provider_key or ""
     if provider_key.startswith("byok:"):
-        provider = db.get(UserProvider, provider_key.split(":", 1)[1])
+        provider = db.scalar(
+            select(UserProvider).where(
+                UserProvider.id == provider_key.split(":", 1)[1],
+                UserProvider.user_id == user_settings.user_id,
+            )
+        )
         if provider and provider.api_key_encrypted:
             try:
                 return (
@@ -212,11 +218,30 @@ async def process_message(message_id: str) -> None:
             select(ChannelIdentity).where(
                 ChannelIdentity.user_id == row.user_id,
                 ChannelIdentity.channel == "wecom_kf",
+                ChannelIdentity.account_id
+                == ((row.metadata_json or {}).get("open_kfid") or settings.wecom_open_kfid),
             )
         )
+        if identity is None:
+            raise RuntimeError("找不到与入站客服账号匹配的用户身份")
         external_id = decrypt_secret(identity.external_id_encrypted)
         open_kfid = (row.metadata_json or {}).get("open_kfid") or settings.wecom_open_kfid
-        answer = answer or "暂时没有生成可发送的内容。"
+        answer = (answer or "").strip()
+        # 空回复不能作为成功结果发送。它通常来自供应商的长推理/临时空响应；
+        # 抛出异常交给 Outbox 重试，避免向用户展示误导性的兜底文案。
+        if not answer:
+            raise RuntimeError("未生成可发送的回复内容，将按任务策略重试")
+
+        # 企微 send_msg 目前没有调用方可提供的幂等键。外部调用成功后若进程在
+        # 本地提交前崩溃，无法区分“未发出”和“已送达”。因此先持久化投递栅栏：
+        # 发生不确定结果时停止自动重发，宁可进入人工死信，也不能重复回复用户。
+        metadata = dict(row.metadata_json or {})
+        if metadata.get("reply_dispatch") == "started":
+            raise RuntimeError("回复投递状态未知，已停止自动重发以避免重复消息")
+        metadata["reply_dispatch"] = "started"
+        row.metadata_json = metadata
+        db.commit()
+
         sent_id = await client.send_text(open_kfid, external_id, answer)
         db.add(
             Message(
@@ -231,14 +256,20 @@ async def process_message(message_id: str) -> None:
                 metadata_json={"reply_to": row.external_message_id},
             )
         )
+        metadata["reply_dispatch"] = "sent"
+        row.metadata_json = metadata
         row.status = MessageStatus.sent
         row.error = None
         db.commit()
     except Exception as exc:
-        row.status = MessageStatus.failed
-        row.error = str(exc)[:1000]
-        db.commit()
-        log.exception("处理消息失败 id=%s", message_id)
+        # flush/commit 失败后 Session 必须先回滚，才能安全持久化失败状态。
+        db.rollback()
+        row = db.get(Message, message_id)
+        if row is not None and row.status != MessageStatus.sent:
+            row.status = MessageStatus.failed
+            row.error = redact_error(exc, 1000)
+            db.commit()
+        log.error("处理消息失败 id=%s error=%s", message_id, redact_error(exc, 300))
         raise
     finally:
         db.close()
@@ -281,7 +312,12 @@ async def _complete_ai(db, row: Message, conversation: Conversation, user_settin
     # 角色卡注入：激活的卡内容作为人格主体，用户自定义人设作为补充
     card_text = ""
     if user_settings.active_card_id:
-        card = db.get(CharacterCard, user_settings.active_card_id)
+        card = db.scalar(
+            select(CharacterCard).where(
+                CharacterCard.id == user_settings.active_card_id,
+                CharacterCard.user_id == row.user_id,
+            )
+        )
         if card and card.content_encrypted:
             card_text = card_service.card_to_system_prompt(
                 card.format, card_service.decrypt_card_content(card.content_encrypted)

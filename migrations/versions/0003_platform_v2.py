@@ -120,6 +120,12 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(["user_id"], ["users.id"], ondelete="CASCADE"),
     )
     op.create_index("ix_command_policies_user_id", "command_policies", ["user_id"])
+    op.create_index(
+        "uq_command_policy_scope",
+        "command_policies",
+        [sa.text("coalesce(user_id, '')"), sa.text("coalesce(channel, '')"), "command"],
+        unique=True,
+    )
 
     # 渠道实例（ClawBot 等多实例）
     op.create_table(
@@ -204,6 +210,7 @@ def downgrade() -> None:
     op.drop_index("ix_channel_instances_owner_user_id", table_name="channel_instances")
     op.drop_index("ix_channel_instances_channel", table_name="channel_instances")
     op.drop_table("channel_instances")
+    op.drop_index("uq_command_policy_scope", table_name="command_policies")
     op.drop_index("ix_command_policies_user_id", table_name="command_policies")
     op.drop_table("command_policies")
     op.drop_index("ix_user_providers_user_id", table_name="user_providers")

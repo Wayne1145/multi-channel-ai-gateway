@@ -11,6 +11,7 @@ from .config import settings
 from .db import SessionLocal
 from .models import Message, MessageStatus, OutboxStatus, OutboxTask
 from .queueing import notify_worker, redis_client
+from .redaction import redact_error
 
 log = logging.getLogger(__name__)
 
@@ -48,6 +49,7 @@ def create_sync_task(token: str, open_kfid: str) -> str:
                 task.attempts = 0
                 task.available_at = utcnow()
                 task.locked_at = None
+                task.lease_token = None
                 task.last_error = None
                 task.rerun_requested = False
         else:
@@ -107,7 +109,11 @@ def claim_task() -> OutboxTask | None:
                     & (OutboxTask.locked_at < stale),
                 ),
             )
-            .values(status=OutboxStatus.processing, locked_at=now)
+            .values(
+                status=OutboxStatus.processing,
+                locked_at=now,
+                lease_token=str(uuid.uuid4()),
+            )
         )
         if claimed.rowcount != 1:
             db.rollback()
@@ -118,33 +124,74 @@ def claim_task() -> OutboxTask | None:
         db.close()
 
 
-def complete_task(task_id: str) -> None:
+def renew_task_lease(task_id: str, lease_token: str) -> bool:
+    """续租当前 Worker 的数据库租约；租约已被接管时返回 False。"""
     db = SessionLocal()
     try:
-        task = db.get(OutboxTask, task_id)
-        if task:
-            if task.task_type == "sync" and task.rerun_requested:
-                task.status = OutboxStatus.pending
-                task.available_at = utcnow()
-                task.rerun_requested = False
-            else:
-                task.status = OutboxStatus.done
-            task.locked_at = None
-            task.last_error = None
-            db.commit()
+        result = db.execute(
+            update(OutboxTask)
+            .where(
+                OutboxTask.id == task_id,
+                OutboxTask.status == OutboxStatus.processing,
+                OutboxTask.lease_token == lease_token,
+            )
+            .values(locked_at=utcnow())
+        )
+        db.commit()
+        return result.rowcount == 1
     finally:
         db.close()
 
 
-def fail_task(task_id: str, error: Exception) -> OutboxStatus:
+def complete_task(task_id: str, lease_token: str | None = None) -> bool:
     db = SessionLocal()
     try:
-        task = db.get(OutboxTask, task_id)
+        conditions = [
+            OutboxTask.id == task_id,
+            OutboxTask.status == OutboxStatus.processing,
+        ]
+        if lease_token is not None:
+            conditions.append(OutboxTask.lease_token == lease_token)
+        task = db.scalar(select(OutboxTask).where(*conditions))
         if not task:
-            return OutboxStatus.dead
-        task.attempts += 1
-        task.last_error = str(error)[:2000]
+            return False
+        if task.task_type == "sync" and task.rerun_requested:
+            task.status = OutboxStatus.pending
+            task.available_at = utcnow()
+            task.rerun_requested = False
+        else:
+            task.status = OutboxStatus.done
         task.locked_at = None
+        task.lease_token = None
+        task.last_error = None
+        db.commit()
+        return True
+    finally:
+        db.close()
+
+
+def fail_task(
+    task_id: str, lease_token: str | Exception | None, error: Exception | None = None
+) -> OutboxStatus | None:
+    """按租约记录失败；旧 Worker 的迟到结果不会覆盖新租约。"""
+    if error is None and isinstance(lease_token, Exception):
+        error = lease_token
+        lease_token = None
+    db = SessionLocal()
+    try:
+        conditions = [
+            OutboxTask.id == task_id,
+            OutboxTask.status == OutboxStatus.processing,
+        ]
+        if lease_token is not None:
+            conditions.append(OutboxTask.lease_token == lease_token)
+        task = db.scalar(select(OutboxTask).where(*conditions))
+        if not task:
+            return None
+        task.attempts += 1
+        task.last_error = redact_error(error or "unknown error")
+        task.locked_at = None
+        task.lease_token = None
         if task.attempts >= settings.task_max_attempts:
             task.status = OutboxStatus.dead
             if task.task_type == "message":
@@ -175,6 +222,7 @@ def replay_task(task_id: str) -> bool:
         task.attempts = 0
         task.available_at = utcnow()
         task.locked_at = None
+        task.lease_token = None
         task.last_error = None
         if task.task_type == "message":
             message = db.get(Message, task.payload.get("message_id"))

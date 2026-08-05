@@ -55,7 +55,7 @@ def test_message_task_is_deduplicated_and_claimed_once(db):
     assert claimed.id == first.id
     assert claimed.status == OutboxStatus.processing
     assert claim_task() is None
-    complete_task(claimed.id)
+    complete_task(claimed.id, claimed.lease_token)
     db.expire_all()
     assert db.get(OutboxTask, first.id).status == OutboxStatus.done
 
@@ -64,17 +64,21 @@ def test_failed_task_retries_then_becomes_dead(db):
     message = make_message(db, "task-dead")
     task = add_message_task(db, message.id)
     db.commit()
+    claimed = claim_task()
     with (
         patch.object(settings, "task_max_attempts", 2),
         patch.object(settings, "task_retry_base_seconds", 1),
     ):
-        status = fail_task(task.id, RuntimeError("temporary"))
+        status = fail_task(task.id, claimed.lease_token, RuntimeError("temporary"))
         assert status == OutboxStatus.pending
         db.expire_all()
         retried = db.get(OutboxTask, task.id)
         assert retried.attempts == 1
         assert retried.last_error == "temporary"
-        status = fail_task(task.id, RuntimeError("permanent"))
+        retried.available_at = retried.available_at.replace(year=2000)
+        db.commit()
+        claimed = claim_task()
+        status = fail_task(task.id, claimed.lease_token, RuntimeError("permanent"))
         assert status == OutboxStatus.dead
     db.expire_all()
     assert db.get(OutboxTask, task.id).status == OutboxStatus.dead
@@ -118,7 +122,7 @@ def test_sync_callback_during_processing_requests_one_rerun(db):
     task = db.get(OutboxTask, task_id)
     assert task.rerun_requested is True
     assert task.payload["token"] == "token-b"
-    complete_task(task_id)
+    complete_task(task_id, task.lease_token)
     db.expire_all()
     task = db.get(OutboxTask, task_id)
     assert task.status == OutboxStatus.pending

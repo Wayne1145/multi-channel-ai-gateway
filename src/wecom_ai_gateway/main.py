@@ -1,6 +1,7 @@
 import logging
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse
@@ -85,7 +86,7 @@ def stats(db: Session = Depends(db_dep)):
         "tokens": db.scalar(
             select(func.coalesce(func.sum(UsageRecord.prompt_tokens + UsageRecord.completion_tokens), 0))
         ),
-        "mode": settings.platform_mode,
+        "mode": resolve_user_mode(db, None),
         "single_user_mode": settings.single_user_mode,
     }
 
@@ -128,6 +129,8 @@ def users(db: Session = Depends(db_dep), limit: int = 50):
             "blocked": u.is_blocked,
             "created_at": u.created_at,
             "model": s.model if s else None,
+            "mode": u.mode,
+            "effective_mode": resolve_user_mode(db, u),
         }
         for u, s in rows
     ]
@@ -198,7 +201,7 @@ class PolicyIn(BaseModel):
     channel: str | None = None  # None=全部渠道
     allowed: bool = True
     silent_block: bool = False
-    blocked_strategy: str = "redirect_to_ai"
+    blocked_strategy: Literal["redirect_to_ai", "ignore"] = "redirect_to_ai"
 
 
 @app.get("/api/admin/mode", dependencies=[Depends(admin)])

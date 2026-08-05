@@ -10,6 +10,7 @@ import httpx
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 from .config import settings
+from .redaction import redact_error
 
 log = logging.getLogger(__name__)
 
@@ -81,12 +82,18 @@ class WeComClient:
 
     async def call(self, path, payload, retry=True):
         token = await self.access_token()
-        async with httpx.AsyncClient(timeout=30) as c:
-            r = await c.post(
-                "https://qyapi.weixin.qq.com" + path, params={"access_token": token}, json=payload
-            )
-            r.raise_for_status()
-            d = r.json()
+        try:
+            async with httpx.AsyncClient(timeout=30) as c:
+                r = await c.post(
+                    "https://qyapi.weixin.qq.com" + path,
+                    params={"access_token": token},
+                    json=payload,
+                )
+                r.raise_for_status()
+                d = r.json()
+        except httpx.HTTPError as exc:
+            # httpx 的异常文本可能包含带 access_token 的请求 URL；日志/死信一律脱敏。
+            raise RuntimeError(redact_error(exc)) from exc
         if d.get("errcode") in {40014, 42001} and retry:
             await self.access_token(True)
             return await self.call(path, payload, False)

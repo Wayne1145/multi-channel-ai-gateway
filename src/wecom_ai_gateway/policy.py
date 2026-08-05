@@ -25,6 +25,8 @@ from sqlalchemy.orm import Session
 from .config import settings
 from .models import CommandPolicy, PlatformConfig, User
 
+_MANAGED_READ_ONLY_COMMANDS = {"help", "status", "usage"}
+
 
 def resolve_user_mode(db: Session, user: User | None) -> str:
     """返回用户当前生效的运行模式：single | self_service | managed。"""
@@ -59,7 +61,8 @@ class CommandDecision:
 def get_command_decision(
     db: Session, user_id: str, channel: str, command: str
 ) -> CommandDecision:
-    """解析某用户在某渠道对某指令的最终策略；无任何策略行时默认放行。"""
+    """解析最终策略；显式策略优先，模式只提供未配置时的安全默认值。"""
+    user = db.get(User, user_id)
     rows = list(
         db.scalars(
             select(CommandPolicy)
@@ -81,6 +84,14 @@ def get_command_decision(
             best = row
             best_score = score
     if best is None:
+        mode = resolve_user_mode(db, user)
+        if mode == "managed" and command not in _MANAGED_READ_ONLY_COMMANDS:
+            return CommandDecision(
+                allowed=False,
+                silent_block=True,
+                blocked_strategy="redirect_to_ai",
+                source="mode",
+            )
         return CommandDecision(allowed=True, source="default")
     source = "user" if best.user_id == user_id else ("channel" if best.channel == channel else "platform")
     return CommandDecision(

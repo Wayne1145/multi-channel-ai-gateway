@@ -9,11 +9,13 @@ from sqlalchemy import (
     Enum,
     Float,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
     UniqueConstraint,
     func,
+    literal_column,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -167,6 +169,8 @@ class OutboxTask(Base):
         DateTime(timezone=True), server_default=func.now(), index=True
     )
     locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # 每次领取都会更换租约令牌；旧 Worker 无权完成或回退新租约。
+    lease_token: Mapped[str | None] = mapped_column(String(36), index=True)
     last_error: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
@@ -222,7 +226,15 @@ class CommandPolicy(Base):
     """指令策略：平台默认(全空) → 渠道(channel) → 用户(user_id) 三级覆盖。"""
 
     __tablename__ = "command_policies"
-    __table_args__ = (UniqueConstraint("user_id", "channel", "command"),)
+    __table_args__ = (
+        Index(
+            "uq_command_policy_scope",
+            func.coalesce(literal_column("user_id"), ""),
+            func.coalesce(literal_column("channel"), ""),
+            literal_column("command"),
+            unique=True,
+        ),
+    )
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     user_id: Mapped[str | None] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"), index=True

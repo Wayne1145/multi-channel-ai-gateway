@@ -41,9 +41,18 @@ class OpenAICompatibleProvider:
             r.raise_for_status()
             data = r.json()
         usage = data.get("usage") or {}
-        content = data["choices"][0]["message"].get("content") or ""
+        choices = data.get("choices") or []
+        if not choices or not isinstance(choices[0], dict):
+            raise RuntimeError("模型响应缺少可用候选内容")
+        message = choices[0].get("message") or {}
+        content = message.get("content")
+        # 部分兼容供应商会在较长推理仍未产出最终文本时返回空 content。
+        # 这不是可发送的客服回复：抛出可重试错误，让 Outbox 按退避策略等待，
+        # 而不是把“暂时没有生成可发送的内容”发给用户。
+        if not isinstance(content, str) or not content.strip():
+            raise RuntimeError("模型尚未生成可发送的最终内容")
         return CompletionResult(
-            content=content,
+            content=content.strip(),
             prompt_tokens=int(usage.get("prompt_tokens", 0)),
             completion_tokens=int(usage.get("completion_tokens", 0)),
         )

@@ -7,7 +7,7 @@
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .models import Preset, UserSettings
+from .models import CharacterCard, Preset, UserSettings
 
 SNAPSHOT_KEYS = [
     "model",
@@ -25,10 +25,19 @@ def snapshot_settings(user_settings: UserSettings) -> dict:
     return {key: getattr(user_settings, key) for key in SNAPSHOT_KEYS}
 
 
-def apply_snapshot(user_settings: UserSettings, config: dict) -> None:
-    """把快照应用到用户设置（仅覆盖存在的字段）。"""
+def apply_snapshot(db: Session, user_settings: UserSettings, config: dict) -> None:
+    """把快照应用到用户设置（仅覆盖存在且属于当前用户的字段）。"""
     for key in SNAPSHOT_KEYS:
         if key in config:
+            if key == "active_card_id" and config[key] is not None:
+                card = db.scalar(
+                    select(CharacterCard).where(
+                        CharacterCard.id == config[key],
+                        CharacterCard.user_id == user_settings.user_id,
+                    )
+                )
+                if card is None:
+                    continue
             setattr(user_settings, key, config[key])
 
 
