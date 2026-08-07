@@ -9,6 +9,8 @@
 
 import json
 import re
+import struct
+import zlib
 
 from .security import decrypt_secret, encrypt_secret
 
@@ -42,6 +44,50 @@ def detect_format(content: str) -> str:
             return "st_v2"
         return "soul_md"
     return "soul_md"
+
+
+def extract_card_from_png(data: bytes) -> str | None:
+    """从 SillyTavern PNG 角色卡提取内嵌 JSON。
+
+    - v2：tEXt chunk，keyword=`chara`，文本即角色卡 JSON；
+    - v3：iTXt chunk，keyword=`ccv3`，可能带 zlib 压缩（compression_flag=1）。
+
+    返回内嵌 JSON 字符串；不是 PNG 或没有角色卡 chunk 时返回 None。
+    """
+    if not data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return None
+    pos = 8
+    while pos + 12 <= len(data):
+        (length,) = struct.unpack(">I", data[pos : pos + 4])
+        ctype = data[pos + 4 : pos + 8]
+        payload = data[pos + 8 : pos + 8 + length]
+        if length < 0 or pos + 8 + length > len(data):
+            return None
+        if ctype in (b"tEXt", b"iTXt"):
+            keyword, sep, text = payload.partition(b"\x00")
+            if not sep:
+                pos += 12 + length
+                continue
+            if keyword in (b"chara", b"ccv3"):
+                if ctype == b"tEXt":
+                    return text.decode("utf-8", errors="replace")
+                # iTXt 布局：keyword\0 compression_flag compression_method
+                #         language_tag\0 translated_keyword\0 text
+                if len(text) < 2:
+                    return None
+                comp_flag = text[0:1]
+                rest = text[2:].split(b"\x00", 2)
+                if len(rest) < 3:
+                    return None
+                body = rest[2]
+                if comp_flag == b"\x01":
+                    try:
+                        body = zlib.decompress(body)
+                    except zlib.error:
+                        return None
+                return body.decode("utf-8", errors="replace")
+        pos += 12 + length
+    return None
 
 
 def parse_soul_md(text: str) -> dict:

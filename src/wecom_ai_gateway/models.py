@@ -284,3 +284,29 @@ class Preset(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
+
+
+class MediaAsset(Base):
+    """渠道媒体消息的安全元数据记录。
+
+    只保存媒体元数据与内容哈希，不主动从外部 URL 拉取/落盘原始文件
+    （避免 SSRF 与存储膨胀）；expires_at 到期后由 Worker 定时清理。
+    """
+
+    __tablename__ = "media_assets"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    message_id: Mapped[str | None] = mapped_column(
+        ForeignKey("messages.id", ondelete="CASCADE"), index=True
+    )
+    channel: Mapped[str] = mapped_column(String(40), index=True)
+    media_type: Mapped[str] = mapped_column(String(40))  # image | voice | file
+    mime: Mapped[str | None] = mapped_column(String(120))
+    size_bytes: Mapped[int] = mapped_column(Integer, default=0)
+    filename: Mapped[str | None] = mapped_column(String(255))
+    sha256: Mapped[str | None] = mapped_column(String(64), index=True)
+    # 原始媒体定位（渠道侧 id/URL）。URL 可能含渠道凭据，管理端 API 一律不返回。
+    storage_key: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(20), default="stored")  # stored | rejected | expired
+    rejected_reason: Mapped[str | None] = mapped_column(String(255))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

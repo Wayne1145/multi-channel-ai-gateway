@@ -47,6 +47,14 @@ class Settings(BaseSettings):
     platform_mode: str = "self_service"
     # 全局单用户开关：true 时忽略平台/用户模式，一切指令放行（.env 手动开启）
     single_user_mode: bool = False
+    # 媒体消息安全生命周期：白名单、大小上限、保留时长（小时）。
+    # 网关只记录元数据，不主动下载外部文件；到期后由 Worker 清理记录。
+    media_allowed_mime_types: str = (
+        "image/jpeg,image/png,image/gif,image/webp,audio/mpeg,audio/ogg,audio/wav,"
+        "application/pdf,text/plain,application/octet-stream"
+    )
+    media_max_size_bytes: int = 20 * 1024 * 1024
+    media_retention_hours: int = 168
 
 
 @lru_cache

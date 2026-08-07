@@ -37,7 +37,10 @@
   }
 
   /* ---------- 视图切换 ---------- */
-  const TITLES = { dashboard: "仪表盘", users: "用户", messages: "消息", tasks: "死信任务" };
+  const TITLES = {
+    dashboard: "仪表盘", users: "用户", instances: "渠道实例",
+    media: "媒体审计", messages: "消息", tasks: "死信任务",
+  };
   function switchView(name) {
     document.querySelectorAll(".nav-item").forEach((b) =>
       b.classList.toggle("active", b.dataset.view === name));
@@ -46,6 +49,8 @@
     $("page-title").textContent = TITLES[name];
     if (name === "dashboard") loadDashboard();
     if (name === "users") loadUsers();
+    if (name === "instances") loadInstances();
+    if (name === "media") loadMedia();
     if (name === "messages") loadMessages();
     if (name === "tasks") loadTasks();
   }
@@ -146,7 +151,6 @@
       const list = q ? rows.filter((u) => (u.id + (u.display_name || "")).toLowerCase().includes(q)) : rows;
       $("user-tbody").innerHTML = list.length
         ? list.map((u) => {
-          const modeVal = u.mode || "跟随平台";
           const modeLabel = u.mode === "managed" ? "统一管理" : u.mode === "self_service" ? "自足" : "跟随平台";
           const toggleTo = u.mode === "managed" ? "self_service" : "managed";
           return `
@@ -158,7 +162,7 @@
               <span class="badge">${esc(modeLabel)}</span>
               <button class="btn btn-sm" data-mode="${u.id}" data-mode-val="${toggleTo}" title="切换用户模式">${u.mode ? "切回" : "设为统一管理"}</button>
             </td>
-            <td><button class="btn btn-sm" data-cards="${u.id}" data-name="${esc(u.display_name || u.id)}">查看</button></td>
+            <td><button class="btn btn-sm" data-detail="${u.id}" data-name="${esc(u.display_name || u.id)}">详情</button></td>
             <td>${u.blocked ? '<span class="badge badge-dead">已封禁</span>' : '<span class="badge badge-ok">正常</span>'}</td>
             <td class="mono small">${esc((u.created_at || "").replace("T", " ").slice(0, 19))}</td>
             <td><button class="btn btn-sm ${u.blocked ? "" : "btn-danger"}" data-block="${u.id}" data-state="${u.blocked ? "0" : "1"}">${u.blocked ? "解封" : "封禁"}</button></td>
@@ -187,21 +191,34 @@
             loadUsers();
           } catch (ex) { toast(ex.message, true); }
         }));
-      document.querySelectorAll("[data-cards]").forEach((b) =>
-        b.addEventListener("click", () => openCards(b.dataset.cards, b.dataset.name)));
+      document.querySelectorAll("[data-detail]").forEach((b) =>
+        b.addEventListener("click", () => openUserDetail(b.dataset.detail, b.dataset.name)));
     } catch (ex) {
       toast(ex.message, true);
     }
   }
   $("user-search").addEventListener("input", () => loadUsers());
 
-  /* ---------- 角色卡元数据（管理员不可读内容） ---------- */
-  async function openCards(userId, name) {
+  /* ---------- 用户详情（管理端不可读内容） ---------- */
+  async function openUserDetail(userId, name) {
     try {
-      const rows = await api(`/api/admin/users/${userId}/cards`);
-      $("card-modal-title").textContent = `角色卡 · ${name}`;
-      $("card-tbody").innerHTML = rows.length
-        ? rows.map((c) => `
+      const [cards, presets, providers, policies, detail] = await Promise.all([
+        api(`/api/admin/users/${userId}/cards`),
+        api(`/api/admin/users/${userId}/presets`),
+        api(`/api/admin/users/${userId}/providers`),
+        api(`/api/admin/users/${userId}/policies`),
+        api(`/api/admin/users/${userId}/detail`),
+      ]);
+      $("user-modal-title").textContent = `用户详情 · ${name}`;
+      $("user-detail-grid").innerHTML = [
+        ["会话数", detail.conversations],
+        ["记忆条数", detail.memories],
+        ["媒体记录", detail.media_assets],
+        ["今日 Tokens", Number(detail.tokens_today).toLocaleString()],
+      ].map(([k, v]) => `<div class="detail-item"><b>${v}</b><span>${k}</span></div>`).join("");
+
+      $("card-tbody").innerHTML = cards.length
+        ? cards.map((c) => `
           <tr>
             <td>${esc(c.name)}</td>
             <td class="mono">${esc(c.format)}</td>
@@ -209,15 +226,123 @@
             <td class="mono small">${esc((c.updated_at || "").replace("T", " ").slice(0, 19))}</td>
           </tr>`).join("")
         : '<tr><td colspan="4" class="muted">该用户还没有角色卡</td></tr>';
-      $("card-modal").classList.remove("hidden");
+
+      $("preset-tbody").innerHTML = presets.length
+        ? presets.map((p) => `
+          <tr>
+            <td>${esc(p.name)}</td>
+            <td class="mono small">${esc((p.updated_at || "").replace("T", " ").slice(0, 19))}</td>
+          </tr>`).join("")
+        : '<tr><td colspan="2" class="muted">暂无预设</td></tr>';
+
+      $("provider-tbody").innerHTML = providers.length
+        ? providers.map((p) => `
+          <tr>
+            <td class="mono">${esc(p.provider_key)}</td>
+            <td class="text-clip" title="${esc(p.base_url || "")}">${esc(p.base_url || "—")}</td>
+            <td class="mono small">${esc((p.models || []).join(", ") || "—")}</td>
+            <td>${p.is_default ? '<span class="badge badge-ok">默认</span>' : "—"}</td>
+          </tr>`).join("")
+        : '<tr><td colspan="4" class="muted">未配置自带供应商（使用平台默认）</td></tr>';
+
+      $("policy-tbody").innerHTML = policies.length
+        ? policies.map((p) => `
+          <tr>
+            <td class="mono">/${esc(p.command)}</td>
+            <td>${p.user_id ? "用户" : (p.channel ? esc(p.channel) : "平台")}</td>
+            <td>${p.allowed ? '<span class="badge badge-ok">允许</span>' : '<span class="badge badge-dead">禁止</span>'}</td>
+            <td>${p.silent_block ? "静默" : "—"}</td>
+            <td class="mono small">${esc(p.blocked_strategy)}</td>
+          </tr>`).join("")
+        : '<tr><td colspan="5" class="muted">无自定义策略（按模式默认执行）</td></tr>';
+
+      $("user-modal").classList.remove("hidden");
     } catch (ex) {
       toast(ex.message, true);
     }
   }
-  $("card-modal-close").addEventListener("click", () => $("card-modal").classList.add("hidden"));
-  $("card-modal").addEventListener("click", (e) => {
-    if (e.target === $("card-modal")) $("card-modal").classList.add("hidden");
+  $("user-modal-close").addEventListener("click", () => $("user-modal").classList.add("hidden"));
+  $("user-modal").addEventListener("click", (e) => {
+    if (e.target === $("user-modal")) $("user-modal").classList.add("hidden");
   });
+
+  /* ---------- 渠道实例 ---------- */
+  async function loadInstances() {
+    try {
+      const rows = await api("/api/admin/channel-instances");
+      $("inst-tbody").innerHTML = rows.length
+        ? rows.map((i) => `
+          <tr>
+            <td>${esc(i.instance_name)}</td>
+            <td class="mono">${esc(i.channel)}</td>
+            <td><span class="badge badge-${i.status === "online" ? "ok" : i.status === "error" ? "dead" : "ignored"}">${esc(i.status)}</span></td>
+            <td class="mono small">${esc((i.owner_user_id || "—").slice(0, 12))}</td>
+            <td class="mono small">${esc((i.created_at || "").replace("T", " ").slice(0, 19))}</td>
+            <td>
+              <button class="btn btn-sm" data-start="${i.id}" ${i.status === "online" ? "disabled" : ""}>启动</button>
+              <button class="btn btn-sm" data-stop="${i.id}" ${i.status !== "online" ? "disabled" : ""}>停止</button>
+            </td>
+          </tr>`).join("")
+        : '<tr><td colspan="6" class="muted">暂无渠道实例</td></tr>';
+      document.querySelectorAll("[data-start]").forEach((b) =>
+        b.addEventListener("click", async () => {
+          try {
+            await api(`/api/admin/channel-instances/${b.dataset.start}/start`, { method: "POST" });
+            toast("启动指令已下发");
+            loadInstances();
+          } catch (ex) { toast(ex.message, true); }
+        }));
+      document.querySelectorAll("[data-stop]").forEach((b) =>
+        b.addEventListener("click", async () => {
+          try {
+            await api(`/api/admin/channel-instances/${b.dataset.stop}/stop`, { method: "POST" });
+            toast("已停止");
+            loadInstances();
+          } catch (ex) { toast(ex.message, true); }
+        }));
+    } catch (ex) {
+      toast(ex.message, true);
+    }
+  }
+  $("inst-create").addEventListener("click", async () => {
+    const name = $("inst-name").value.trim();
+    const owner = $("inst-owner").value.trim();
+    if (!name) { toast("实例名称必填", true); return; }
+    try {
+      const body = { channel: $("inst-channel").value, instance_name: name };
+      if (owner) body.owner_user_id = owner;
+      await api("/api/admin/channel-instances", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      $("inst-name").value = "";
+      $("inst-owner").value = "";
+      toast("实例已创建");
+      loadInstances();
+    } catch (ex) { toast(ex.message, true); }
+  });
+
+  /* ---------- 媒体审计 ---------- */
+  async function loadMedia() {
+    try {
+      const rows = await api("/api/admin/media?limit=200");
+      $("media-tbody").innerHTML = rows.length
+        ? rows.slice(0, 150).map((m) => `
+          <tr>
+            <td class="mono small">${esc((m.created_at || "").replace("T", " ").slice(5, 19))}</td>
+            <td class="mono">${esc(m.channel)}</td>
+            <td>${esc(m.media_type)}</td>
+            <td class="mono small">${esc(m.mime || "—")}</td>
+            <td class="mono small">${m.size_bytes ? (m.size_bytes / 1024).toFixed(1) + " KB" : "—"}</td>
+            <td><span class="badge badge-${m.status === "stored" ? "ok" : m.status === "rejected" ? "dead" : "ignored"}">${esc(m.status)}</span></td>
+            <td class="small">${esc(m.rejected_reason || "—")}</td>
+          </tr>`).join("")
+        : '<tr><td colspan="7" class="muted">暂无媒体记录</td></tr>';
+    } catch (ex) {
+      toast(ex.message, true);
+    }
+  }
 
   /* ---------- 消息 ---------- */
   async function loadMessages() {

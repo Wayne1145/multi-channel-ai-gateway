@@ -10,21 +10,29 @@ from pydantic import BaseModel
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
+from .cards import detect_format, encrypt_card_content, extract_card_from_png
 from .channels import ChannelMessage, registry
 from .clawbot import register_clawbot_adapter
 from .config import settings
 from .db import SessionLocal, session_scope
+from .media import list_media_metadata
+from .migration import migrate_user_mode
 from .models import (
     ChannelInstance,
     CharacterCard,
     CommandPolicy,
+    Conversation,
+    MediaAsset,
+    Memory,
     Message,
     MessageStatus,
     OutboxStatus,
     OutboxTask,
     PlatformConfig,
+    Preset,
     UsageRecord,
     User,
+    UserProvider,
     UserSettings,
 )
 from .policy import resolve_user_mode
@@ -199,6 +207,12 @@ def dead_tasks(db: Session = Depends(db_dep), limit: int = 100):
         }
         for task in rows
     ]
+
+
+@app.get("/api/admin/media", dependencies=[Depends(admin)])
+def media_metadata(db: Session = Depends(db_dep), limit: int = 100):
+    """媒体元数据审计：不含 storage_key/URL 等可能携带凭据的字段。"""
+    return list_media_metadata(db, limit=limit)
 
 
 @app.post("/api/admin/tasks/{task_id}/replay", dependencies=[Depends(admin)])
@@ -398,9 +412,9 @@ def set_user_mode(user_id: str, body: ModeIn, db: Session = Depends(db_dep)):
         raise HTTPException(404, "user not found")
     if body.mode not in {None, "self_service", "managed"}:
         raise HTTPException(400, "mode must be self_service|managed|null")
-    u.mode = body.mode
+    summary = migrate_user_mode(db, u, body.mode)
     db.commit()
-    return {"ok": True, "user_id": user_id, "mode": u.mode}
+    return {"ok": True, "user_id": user_id, "mode": u.mode, "migration": summary}
 
 
 @app.get("/api/admin/users/{user_id}/cards", dependencies=[Depends(admin)])
@@ -424,6 +438,67 @@ def user_cards(user_id: str, db: Session = Depends(db_dep)):
     ]
 
 
+class CardImportIn(BaseModel):
+    """角色卡导入：content 直接给文本（SOUL.md 或 SillyTavern JSON）；
+    png_base64 给 PNG 内嵌卡数据（v2/v3 自动提取）。"""
+
+    name: str
+    content: str | None = None
+    png_base64: str | None = None
+
+
+@app.post("/api/admin/users/{user_id}/cards/import", dependencies=[Depends(admin)])
+def import_user_card(user_id: str, body: CardImportIn, db: Session = Depends(db_dep)):
+    """管理员替用户导入角色卡（不读卡内容，仅落库加密）。"""
+    if not db.get(User, user_id):
+        raise HTTPException(404, "user not found")
+    name = body.name.strip()[:120]
+    if not name:
+        raise HTTPException(400, "name is required")
+    if body.content and body.png_base64:
+        raise HTTPException(400, "provide content or png_base64, not both")
+    raw_content = body.content
+    if body.png_base64:
+        try:
+            import base64
+
+            raw_content = extract_card_from_png(base64.b64decode(body.png_base64))
+        except (ValueError, TypeError):
+            raise HTTPException(400, "png_base64 is not valid base64") from None
+        if not raw_content:
+            raise HTTPException(400, "PNG 中未找到 SillyTavern 角色卡（chara/ccv3 chunk）")
+    if not raw_content or not raw_content.strip():
+        raise HTTPException(400, "content is required")
+    content = raw_content.strip()[:20000]
+    fmt = detect_format(content)
+    exists = db.scalar(
+        select(CharacterCard).where(CharacterCard.user_id == user_id, CharacterCard.name == name)
+    )
+    if exists:
+        # 同名导入视为更新：保留激活状态与所有权
+        exists.format = fmt
+        exists.content_encrypted = encrypt_card_content(content)
+        card = exists
+    else:
+        card = CharacterCard(
+            user_id=user_id, name=name, format=fmt, content_encrypted=encrypt_card_content(content)
+        )
+        db.add(card)
+        db.flush()
+    db.commit()
+    return {
+        "ok": True,
+        "card": {
+            "id": card.id,
+            "name": card.name,
+            "format": card.format,
+            "active": card.active,
+            "created_at": card.created_at,
+            "updated_at": card.updated_at,
+        },
+    }
+
+
 @app.get("/api/admin/users/{user_id}/policies", dependencies=[Depends(admin)])
 def user_policies(user_id: str, db: Session = Depends(db_dep)):
     rows = db.scalars(
@@ -443,6 +518,78 @@ def user_policies(user_id: str, db: Session = Depends(db_dep)):
         }
         for p in rows
     ]
+
+
+@app.get("/api/admin/users/{user_id}/presets", dependencies=[Depends(admin)])
+def user_presets(user_id: str, db: Session = Depends(db_dep)):
+    """预设元数据：只暴露名称与更新时间，不暴露快照内容。"""
+    if not db.get(User, user_id):
+        raise HTTPException(404, "user not found")
+    rows = db.scalars(
+        select(Preset).where(Preset.user_id == user_id).order_by(Preset.created_at)
+    )
+    return [
+        {
+            "id": p.id,
+            "name": p.name,
+            "created_at": p.created_at,
+            "updated_at": p.updated_at,
+        }
+        for p in rows
+    ]
+
+
+@app.get("/api/admin/users/{user_id}/providers", dependencies=[Depends(admin)])
+def user_providers(user_id: str, db: Session = Depends(db_dep)):
+    """BYOK 元数据：绝不返回 api_key_encrypted 或任何密钥字段。"""
+    if not db.get(User, user_id):
+        raise HTTPException(404, "user not found")
+    rows = db.scalars(
+        select(UserProvider).where(UserProvider.user_id == user_id).order_by(UserProvider.created_at)
+    )
+    return [
+        {
+            "id": p.id,
+            "provider_key": p.provider_key,
+            "base_url": p.base_url,
+            "models": p.models,
+            "is_default": p.is_default,
+            "created_at": p.created_at,
+            "updated_at": p.updated_at,
+        }
+        for p in rows
+    ]
+
+
+@app.get("/api/admin/users/{user_id}/detail", dependencies=[Depends(admin)])
+def user_detail(user_id: str, db: Session = Depends(db_dep)):
+    """用户详情统计：会话/记忆/媒体/今日用量，均为聚合数字。"""
+    u = db.get(User, user_id)
+    if not u:
+        raise HTTPException(404, "user not found")
+    today = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+    conversations = db.scalar(
+        select(func.count()).select_from(Conversation).where(Conversation.user_id == user_id)
+    )
+    memories = db.scalar(
+        select(func.count()).select_from(Memory).where(Memory.user_id == user_id)
+    )
+    media = db.scalar(
+        select(func.count()).select_from(MediaAsset)
+        .join(Message, Message.id == MediaAsset.message_id)
+        .where(Message.user_id == user_id)
+    )
+    tokens_today = db.scalar(
+        select(func.coalesce(func.sum(UsageRecord.prompt_tokens + UsageRecord.completion_tokens), 0))
+        .where(UsageRecord.user_id == user_id, UsageRecord.created_at >= today)
+    )
+    return {
+        "user_id": user_id,
+        "conversations": conversations or 0,
+        "memories": memories or 0,
+        "media_assets": media or 0,
+        "tokens_today": int(tokens_today or 0),
+    }
 
 
 def _upsert_policy(db: Session, body: PolicyIn, user_id: str | None) -> CommandPolicy:

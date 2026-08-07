@@ -8,6 +8,7 @@ from .channels import ChannelMessage, OutgoingMessage, registry
 from .commands import execute, memory_text
 from .config import settings
 from .db import SessionLocal
+from .media import record_media_items
 from .models import (
     ChannelIdentity,
     ChannelState,
@@ -117,6 +118,7 @@ def ingest_channel_message(db, incoming: ChannelMessage) -> Message | None:
 
     非文本消息保留为 ignored；重复 external_message_id 不会生成第二条任务。
     渠道适配器只需构造 ChannelMessage，不能绕过这条隔离路径。
+    媒体条目只落 MediaAsset 元数据，不进 metadata_json（避免 URL/凭据滞留）。
     """
     if not incoming.external_message_id:
         raise ValueError("渠道消息缺少 external_message_id")
@@ -130,6 +132,7 @@ def ingest_channel_message(db, incoming: ChannelMessage) -> Message | None:
         return None
     user = resolve_user(db, incoming.sender_id, incoming.instance_id, incoming.channel)
     conversation = active_conversation(db, user.id)
+    media = [m for m in (incoming.media or []) if isinstance(m, dict)]
     should_reply = incoming.message_type == "text" and bool(incoming.content) and not user.is_blocked
     row = Message(
         conversation_id=conversation.id,
@@ -143,12 +146,14 @@ def ingest_channel_message(db, incoming: ChannelMessage) -> Message | None:
         metadata_json={
             "instance_id": incoming.instance_id,
             "sender_id": incoming.sender_id,
-            "media": incoming.media,
-            "raw": incoming.raw,
+            "media_count": len(media),
+            "media_types": sorted({m.get("media_type") or m.get("type") or "" for m in media}),
         },
     )
     db.add(row)
     db.flush()
+    if media:
+        record_media_items(db, row.id, incoming.channel, media)
     if row.status == MessageStatus.queued:
         add_message_task(db, row.id)
     return row
@@ -170,6 +175,10 @@ def ingest(db, item: dict) -> None:
     user = resolve_user(db, external_id, open_kfid) if external_id else None
     conversation = active_conversation(db, user.id) if user else None
     content = (item.get("text") or {}).get("content") if msgtype == "text" else None
+    # 企微媒体消息：image/voice/file 携带 media_id 等定位信息，仅记录安全元数据
+    media: list[dict] = []
+    if msgtype in {"image", "voice", "file"}:
+        media = [{"media_type": msgtype, "media_id": item.get("media_id"), "mime": item.get("format")}]
     should_reply = origin == 3 and msgtype == "text" and user and not user.is_blocked
     row = Message(
         conversation_id=conversation.id if conversation else None,
@@ -180,10 +189,17 @@ def ingest(db, item: dict) -> None:
         message_type=msgtype,
         content=content,
         status=MessageStatus.queued if should_reply else MessageStatus.ignored,
-        metadata_json={"origin": origin, "open_kfid": open_kfid},
+        metadata_json={
+            "origin": origin,
+            "open_kfid": open_kfid,
+            "media_count": len(media),
+            "media_types": sorted({m.get("media_type") or "" for m in media}),
+        },
     )
     db.add(row)
     db.flush()
+    if media:
+        record_media_items(db, row.id, "wecom_kf", media)
 
 
 def resolve_provider(db, user_settings: UserSettings):

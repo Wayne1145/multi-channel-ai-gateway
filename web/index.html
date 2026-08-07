@@ -12,7 +12,7 @@
 <div id="login" class="login-wrap">
   <form id="login-form" class="login-card" autocomplete="off">
     <div class="brand brand-lg">Tsukuyomi</div>
-    <div class="login-sub">WeCom AI Gateway · 管理后台</div>
+    <div class="login-sub">AI Gateway · 管理后台</div>
     <input id="token-input" type="password" class="field" placeholder="管理员令牌" required>
     <button type="submit" class="btn btn-block" id="login-btn">进入后台</button>
     <p class="login-hint">令牌仅保存在本浏览器会话中</p>
@@ -27,6 +27,8 @@
     <nav class="nav">
       <button class="nav-item active" data-view="dashboard">仪表盘</button>
       <button class="nav-item" data-view="users">用户</button>
+      <button class="nav-item" data-view="instances">渠道实例</button>
+      <button class="nav-item" data-view="media">媒体审计</button>
       <button class="nav-item" data-view="messages">消息</button>
       <button class="nav-item" data-view="tasks">死信任务</button>
     </nav>
@@ -69,6 +71,44 @@
             <tbody id="user-tbody"></tbody>
           </table>
         </div>
+      </div>
+    </section>
+
+    <!-- 渠道实例 -->
+    <section id="view-instances" class="view hidden">
+      <div class="card">
+        <div class="card-head">
+          <h2>新建渠道实例</h2>
+          <div class="filters" style="flex-wrap: wrap; row-gap: 8px;">
+            <select id="inst-channel" class="field field-sm">
+              <option value="wechat_clawbot">微信 ClawBot</option>
+            </select>
+            <input id="inst-name" class="field field-sm" placeholder="实例名称（必填）" style="min-width: 180px;">
+            <input id="inst-owner" class="field field-sm" placeholder="所有者用户 ID（可选）" style="min-width: 200px;">
+            <button id="inst-create" class="btn btn-sm">创建</button>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table class="table">
+            <thead><tr><th>名称</th><th>渠道</th><th>状态</th><th>所有者</th><th>创建时间</th><th></th></tr></thead>
+            <tbody id="inst-tbody"></tbody>
+          </table>
+        </div>
+        <p class="muted small" style="margin-top: 10px;">登录态与扫码会话由独立桥接服务保管；此处仅管理公开配置与启停。</p>
+      </div>
+    </section>
+
+    <!-- 媒体审计 -->
+    <section id="view-media" class="view hidden">
+      <div class="card">
+        <div class="card-head"><h2>媒体元数据审计</h2></div>
+        <div class="table-wrap">
+          <table class="table">
+            <thead><tr><th>时间</th><th>渠道</th><th>类型</th><th>MIME</th><th>大小</th><th>状态</th><th>拒绝原因</th></tr></thead>
+            <tbody id="media-tbody"></tbody>
+          </table>
+        </div>
+        <p class="muted small" style="margin-top: 10px;">仅保存安全元数据，不落盘原始文件；原始定位与 URL 不展示。过期记录由 Worker 自动清理。</p>
       </div>
     </section>
 
@@ -119,20 +159,51 @@
 
 <div id="toast" class="toast hidden"></div>
 
-<!-- 角色卡元数据弹窗（管理端不解密内容） -->
-<div id="card-modal" class="modal-mask hidden">
-  <div class="modal">
+<!-- 用户详情弹窗（管理端不解密内容） -->
+<div id="user-modal" class="modal-mask hidden">
+  <div class="modal modal-lg">
     <div class="modal-head">
-      <h2 id="card-modal-title">角色卡</h2>
-      <button class="btn btn-ghost" id="card-modal-close">关闭</button>
+      <h2 id="user-modal-title">用户详情</h2>
+      <button class="btn btn-ghost" id="user-modal-close">关闭</button>
     </div>
-    <div class="table-wrap">
-      <table class="table">
-        <thead><tr><th>名称</th><th>格式</th><th>生效</th><th>更新时间</th></tr></thead>
-        <tbody id="card-tbody"></tbody>
-      </table>
+    <div id="user-detail-grid" class="detail-grid"></div>
+    <div class="modal-section">
+      <h3>角色卡</h3>
+      <div class="table-wrap">
+        <table class="table">
+          <thead><tr><th>名称</th><th>格式</th><th>生效</th><th>更新时间</th></tr></thead>
+          <tbody id="card-tbody"></tbody>
+        </table>
+      </div>
     </div>
-    <p class="muted small modal-foot">内容加密存储，管理员无法读取。</p>
+    <div class="modal-section">
+      <h3>预设</h3>
+      <div class="table-wrap">
+        <table class="table">
+          <thead><tr><th>名称</th><th>更新时间</th></tr></thead>
+          <tbody id="preset-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+    <div class="modal-section">
+      <h3>自带供应商（BYOK）</h3>
+      <div class="table-wrap">
+        <table class="table">
+          <thead><tr><th>类型</th><th>Base URL</th><th>模型</th><th>默认</th></tr></thead>
+          <tbody id="provider-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+    <div class="modal-section">
+      <h3>指令策略</h3>
+      <div class="table-wrap">
+        <table class="table">
+          <thead><tr><th>指令</th><th>作用域</th><th>允许</th><th>静默</th><th>拦截策略</th></tr></thead>
+          <tbody id="policy-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+    <p class="muted small modal-foot">角色卡、记忆与密钥内容加密存储，管理员无法读取。</p>
   </div>
 </div>
 

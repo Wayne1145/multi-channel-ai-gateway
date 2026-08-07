@@ -2,6 +2,7 @@ import asyncio
 import logging
 
 from .config import settings
+from .media import cleanup_expired_media
 from .queueing import WAKE_QUEUE, redis_client
 from .redaction import redact_error
 from .services import process_message, sync_wecom_messages
@@ -77,6 +78,7 @@ async def main():
     r = redis_client()
     log.info("任务 Worker 已启动（持久化 Outbox 模式）")
     last_reconcile = 0.0
+    last_media_cleanup = 0.0
     while True:
         now = asyncio.get_running_loop().time()
         if now - last_reconcile >= 60:
@@ -84,6 +86,20 @@ async def main():
             if repaired:
                 log.warning("补偿创建了 %s 个消息任务", repaired)
             last_reconcile = now
+        if now - last_media_cleanup >= 3600:
+            from .db import SessionLocal
+
+            db = SessionLocal()
+            try:
+                removed = cleanup_expired_media(db)
+                db.commit()
+                if removed:
+                    log.info("媒体清理：删除 %s 条过期记录", removed)
+            except Exception:
+                log.exception("媒体过期清理失败")
+            finally:
+                db.close()
+            last_media_cleanup = now
         processed = await drain_available_tasks()
         if processed:
             continue

@@ -134,6 +134,55 @@ def test_user_cards_metadata_api():
     assert client.get("/api/admin/users/nonexistent/cards", headers=headers).status_code == 404
 
 
+def test_user_detail_presets_providers_and_mode_migration_api():
+    from wecom_ai_gateway.db import SessionLocal
+    from wecom_ai_gateway.models import CharacterCard, Memory, Preset, User, UserProvider
+    from wecom_ai_gateway.security import encrypt_secret
+
+    headers = {"X-Admin-Token": "test-admin-token"}
+    db = SessionLocal()
+    u = User()
+    db.add(u)
+    db.commit()
+    uid = u.id
+    db.add(CharacterCard(user_id=uid, name="卡", format="soul_md", content_encrypted=encrypt_secret("x")))
+    db.add(Memory(user_id=uid, content="", content_encrypted=encrypt_secret("mem")))
+    db.add(Preset(user_id=uid, name="工作", config={"model": "deepseek-chat"}))
+    db.add(UserProvider(user_id=uid, provider_key="openai-compatible", api_key_encrypted=encrypt_secret("sk-test"), base_url="https://x.example/v1", models=["m1"]))
+    db.commit()
+    db.close()
+
+    detail = client.get(f"/api/admin/users/{uid}/detail", headers=headers).json()
+    assert detail["conversations"] >= 0
+    assert detail["memories"] == 1
+    assert "media_assets" in detail and "tokens_today" in detail
+
+    presets = client.get(f"/api/admin/users/{uid}/presets", headers=headers).json()
+    assert [p["name"] for p in presets] == ["工作"]
+    # 快照内容不暴露
+    assert all("config" not in p for p in presets)
+
+    providers = client.get(f"/api/admin/users/{uid}/providers", headers=headers).json()
+    assert providers[0]["base_url"] == "https://x.example/v1"
+    assert "api_key" not in providers[0] and "api_key_encrypted" not in providers[0]
+
+    # 模式迁移 API：切换 + 摘要 + 审计
+    r = client.post(
+        f"/api/admin/users/{uid}/mode", headers=headers,
+        json={"mode": "managed"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["mode"] == "managed"
+    assert body["migration"]["scale"]["memories"] == 1
+    from wecom_ai_gateway.db import SessionLocal as SL
+    from wecom_ai_gateway.models import AuditLog
+
+    db = SL()
+    assert db.query(AuditLog).filter_by(action="mode.migrate", user_id=uid).count() == 1
+    db.close()
+
+
 def test_channel_instance_api_does_not_expose_login_secrets(monkeypatch):
     from wecom_ai_gateway.clawbot import ClawBotAdapter
     from wecom_ai_gateway.main import registry
