@@ -308,6 +308,22 @@ async def process_message(message_id: str) -> None:
 
         if row.channel == "wecom_kf":
             sent_id = await client.send_text(account_id, external_id, answer)
+            outbound_media = list(metadata.get("media") or [])
+            for media in outbound_media:
+                media_msg_id = await client.send_media(account_id, external_id, media)
+                db.add(
+                    Message(
+                        conversation_id=row.conversation_id,
+                        user_id=row.user_id,
+                        channel=row.channel,
+                        external_message_id=media_msg_id or f"local:{row.id}",
+                        direction=MessageDirection.outbound,
+                        message_type=str(media.get("media_type") or "media"),
+                        content=None,
+                        status=MessageStatus.sent,
+                        metadata_json={"reply_to": row.external_message_id, "media": True},
+                    )
+                )
         else:
             adapter = registry.get(row.channel)
             sent_id = await adapter.send(
@@ -319,6 +335,31 @@ async def process_message(message_id: str) -> None:
                     metadata={"reply_to": row.external_message_id},
                 )
             )
+            outbound_media = list(metadata.get("media") or [])
+            for media in outbound_media:
+                media_msg_id = await adapter.send_media(
+                    OutgoingMessage(
+                        channel=row.channel,
+                        instance_id=account_id,
+                        to_sender_id=external_id,
+                        text="",
+                        media=[media],
+                        metadata={"reply_to": row.external_message_id},
+                    )
+                )
+                db.add(
+                    Message(
+                        conversation_id=row.conversation_id,
+                        user_id=row.user_id,
+                        channel=row.channel,
+                        external_message_id=media_msg_id or f"local:{row.id}",
+                        direction=MessageDirection.outbound,
+                        message_type=str(media.get("media_type") or "media"),
+                        content=None,
+                        status=MessageStatus.sent,
+                        metadata_json={"reply_to": row.external_message_id, "media": True},
+                    )
+                )
         db.add(
             Message(
                 conversation_id=row.conversation_id,

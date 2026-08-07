@@ -115,3 +115,43 @@ def test_generic_channel_ingest_records_media_for_non_text_message(db):
     assert assets[0].media_type == "image"
     # metadata_json 只保留汇总信息，不滞留原始 URL/凭据
     assert "MEDIA_9" not in str(row.metadata_json)
+
+
+# ---------- 出站媒体发送 ----------
+
+
+@pytest.mark.anyio
+async def test_wecom_upload_media_rejects_insecure_url():
+    from wecom_ai_gateway.wecom import client as wecom_client
+
+    with pytest.raises(ValueError):
+        await wecom_client.upload_media("image", "http://example.com/a.png")
+    with pytest.raises(ValueError):
+        await wecom_client.upload_media("image", "https://user:pass@example.com/a.png")
+
+
+@pytest.mark.anyio
+async def test_wecom_send_media_rejects_unsupported_type():
+    from wecom_ai_gateway.wecom import client as wecom_client
+
+    with pytest.raises(ValueError):
+        await wecom_client.send_media("kfid", "uid", {"media_type": "video"})
+
+
+@pytest.mark.anyio
+async def test_wecom_send_media_requires_media_id_or_url(monkeypatch):
+    from wecom_ai_gateway.wecom import client as wecom_client
+
+    # 无 media_id 且无 url → 直接 ValueError，不应触发任何上传
+    async def _no_upload(*args, **kwargs):
+        raise AssertionError("不应触发上传")
+
+    original_upload = wecom_client.upload_media
+    monkeypatch.setattr(wecom_client, "upload_media", _no_upload)
+    with pytest.raises(ValueError):
+        await wecom_client.send_media("kfid", "uid", {"media_type": "image"})
+
+    # url 非 https → upload_media 的 URL 校验拒绝（不 monkeypatch）
+    monkeypatch.setattr(wecom_client, "upload_media", original_upload)
+    with pytest.raises(ValueError):
+        await wecom_client.send_media("kfid", "uid", {"media_type": "image", "url": "ftp://x/y"})

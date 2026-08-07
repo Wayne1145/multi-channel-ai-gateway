@@ -4,6 +4,7 @@ import logging
 import struct
 import time
 from dataclasses import dataclass
+from urllib.parse import urlsplit
 from xml.etree import ElementTree
 
 import httpx
@@ -124,6 +125,59 @@ class WeComClient:
         if d.get("errcode") != 0:
             raise RuntimeError(f"send_msg failed: {d.get('errcode')} {d.get('errmsg')}")
         return d.get("msgid")
+
+    async def send_media(self, open_kfid, user_id, media: dict):
+        """发送客服媒体消息（image/voice/file）。
+
+        企微客服消息 media_id 优先直发；没有 media_id 时先上传临时素材
+        （/cgi-bin/media/upload）再发。返回渠道侧 msgid。
+        """
+        media_type = str(media.get("media_type") or "image")
+        if media_type not in {"image", "voice", "file"}:
+            raise ValueError(f"不支持的客服媒体类型：{media_type}")
+        media_id = media.get("media_id") or ""
+        if not media_id and media.get("url"):
+            media_id = await self.upload_media(media_type, media["url"])
+        if not media_id:
+            raise ValueError("发送客服媒体需要 media_id 或可下载的 url")
+        d = await self.call(
+            "/cgi-bin/kf/send_msg",
+            {
+                "touser": user_id,
+                "open_kfid": open_kfid,
+                "msgtype": media_type,
+                media_type: {"media_id": media_id},
+            },
+        )
+        if d.get("errcode") != 0:
+            raise RuntimeError(f"send_msg failed: {d.get('errcode')} {d.get('errmsg')}")
+        return d.get("msgid")
+
+    async def upload_media(self, media_type: str, url: str) -> str:
+        """从 url 下载文件并上传为企微临时素材，返回 media_id。
+
+        只允许 https；拒绝带凭据的 URL（httpx 会校验），避免 SSRF 与凭据泄漏。
+        """
+        parsed = urlsplit(url)
+        if parsed.scheme != "https" or parsed.username or parsed.password:
+            raise ValueError("媒体 url 必须为无凭据的 https 地址")
+        token = await self.access_token()
+        try:
+            async with httpx.AsyncClient(timeout=settings.wecom_upload_timeout_seconds, follow_redirects=True) as c:
+                r = await c.get(url)
+                r.raise_for_status()
+                upload = await c.post(
+                    "https://qyapi.weixin.qq.com/cgi-bin/media/upload",
+                    params={"access_token": token, "type": media_type},
+                    files={"media": (f"media.{media_type}", r.content)},
+                )
+                upload.raise_for_status()
+                d = upload.json()
+        except httpx.HTTPError as exc:
+            raise RuntimeError(redact_error(exc)) from exc
+        if d.get("errcode") != 0:
+            raise RuntimeError(f"media/upload failed: {d.get('errcode')} {d.get('errmsg')}")
+        return d["media_id"]
 
 
 client = WeComClient()

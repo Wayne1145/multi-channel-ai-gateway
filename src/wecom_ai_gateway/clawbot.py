@@ -50,6 +50,12 @@ class ClawBotAdapter(ChannelAdapter):
             raise RuntimeError("ClawBot 桥接响应缺少消息 ID")
         return message_id
 
+    async def send_media(self, message: OutgoingMessage) -> str | None:
+        """ClawBot 桥接协议支持 media 字段，媒体走同一发送通道。"""
+        if not message.media:
+            return None
+        return await self.send(message)
+
     async def _post(self, path: str, payload: dict[str, Any]) -> dict:
         try:
             async with httpx.AsyncClient(timeout=settings.clawbot_request_timeout_seconds) as client:

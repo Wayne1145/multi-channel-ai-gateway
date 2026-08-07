@@ -57,6 +57,14 @@ class ChannelAdapter(ABC):
     async def send(self, message: OutgoingMessage) -> str:
         """发送消息并返回渠道侧消息 ID。"""
 
+    async def send_media(self, message: OutgoingMessage) -> str | None:
+        """发送媒体消息（image/voice/file）。默认渠道不支持媒体，返回 None。
+
+        media 条目形如 {"media_type": "image"|"voice"|"file", "media_id": ...,
+        "url": ..., "mime": ...}；适配器按渠道能力选择 media_id 直发或先上传。
+        """
+        return None
+
 
 class ChannelRegistry:
     """进程内适配器注册表；重复注册被拒绝，避免实例被静默覆盖。"""
