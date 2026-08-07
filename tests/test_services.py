@@ -3,6 +3,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from wecom_ai_gateway.channels import ChannelMessage
+from wecom_ai_gateway.config import settings
 from wecom_ai_gateway.models import (
     ChannelIdentity,
     Conversation,
@@ -145,3 +146,35 @@ async def test_empty_model_reply_is_retried_instead_of_sending_fallback(db):
     failed = db.get(Message, row.id)
     assert failed.status == MessageStatus.failed
     assert "暂时没有生成可发送的内容" not in (failed.error or "")
+
+
+@pytest.mark.anyio
+async def test_default_max_tokens_is_used_when_user_has_no_override(db):
+    user = User()
+    db.add(user)
+    db.flush()
+    user_settings = UserSettings(user_id=user.id)
+    conversation = Conversation(user_id=user.id)
+    row = Message(
+        user_id=user.id,
+        conversation_id=conversation.id,
+        channel="wecom_kf",
+        external_message_id="msg-default-max-tokens",
+        direction="inbound",
+        message_type="text",
+        content="请详细回答",
+        status=MessageStatus.processing,
+    )
+    db.add_all([user_settings, conversation, row])
+    db.flush()
+    provider = AsyncMock()
+    provider.complete.return_value = CompletionResult(content="正常回复")
+    with (
+        patch(
+            "wecom_ai_gateway.services.resolve_provider",
+            return_value=("openai-compatible", "https://example.invalid/v1", "test-key"),
+        ),
+        patch("wecom_ai_gateway.services.provider_for", return_value=provider),
+    ):
+        assert await _complete_ai(db, row, conversation, user_settings) == "正常回复"
+    assert provider.complete.await_args.args[3] == settings.default_max_tokens

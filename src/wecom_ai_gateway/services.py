@@ -405,7 +405,7 @@ async def _complete_ai(db, row: Message, conversation: Conversation, user_settin
         prompts,
         model,
         user_settings.temperature if user_settings.temperature is not None else 0.7,
-        user_settings.max_tokens or 2048,
+        user_settings.max_tokens or settings.default_max_tokens,
     )
     db.add(
         UsageRecord(

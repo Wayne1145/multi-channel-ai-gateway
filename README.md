@@ -37,7 +37,7 @@
 /model use deepseek-chat
 /persona set 你是一位严谨的学习助手
 /temperature 0.6
-/max-tokens 2048
+/max-tokens 4096
 /context 20
 /new
 /clear confirm

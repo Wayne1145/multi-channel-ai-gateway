@@ -27,6 +27,9 @@ class Settings(BaseSettings):
     # 模型推理可能包含较长的思考阶段。默认 300 秒避免把正常长响应误判为失败；
     # Worker 会持续续租任务，避免该等待期间被其他 Worker 重复领取。
     request_timeout_seconds: int = 300
+    # 推理模型将思考 token 与最终回答共同计入 max_tokens；2048 容易只产出思考而没有最终文本。
+    # 用户未单独设置时给 4096，确保复杂请求仍有空间生成可发送答案。
+    default_max_tokens: int = 4096
     user_daily_token_quota: int = 100000
     unconfigured_model_message: str = "模型服务正在配置中。命令功能仍可使用，发送 /help 查看可用设置。"
     worker_poll_seconds: float = 2.0

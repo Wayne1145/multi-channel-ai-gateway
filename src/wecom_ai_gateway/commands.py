@@ -97,7 +97,7 @@ def execute(db: Session, user_id: str, text: str) -> CommandResult:
             f"供应商：{provider_text}\n"
             f"模型：{user_settings.model or settings.default_model}\n"
             f"温度：{temperature}\n"
-            f"最大输出：{user_settings.max_tokens or 2048}\n"
+            f"最大输出：{user_settings.max_tokens or settings.default_max_tokens}\n"
             f"上下文：{user_settings.context_messages}\n"
             f"记忆：{memory_status}",
         )
