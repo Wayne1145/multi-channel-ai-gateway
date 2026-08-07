@@ -101,6 +101,25 @@
     toast("已刷新");
   });
 
+  /* ---------- 数字滚动 ---------- */
+  const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  function animateCount(el, value) {
+    const target = Number(value) || 0;
+    if (reduceMotion || target === 0) {
+      el.textContent = target.toLocaleString();
+      return;
+    }
+    const dur = 620;
+    const t0 = performance.now();
+    const tick = (t) => {
+      const p = Math.min(1, (t - t0) / dur);
+      const eased = 1 - Math.pow(1 - p, 3);
+      el.textContent = Math.round(target * eased).toLocaleString();
+      if (p < 1) requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  }
+
   /* ---------- 仪表盘 ---------- */
   async function loadDashboard() {
     try {
@@ -108,15 +127,16 @@
         api("/api/admin/stats"),
         api("/api/admin/usage/trend?days=7"),
       ]);
-      $("stat-users").textContent = stats.users;
-      $("stat-messages").textContent = stats.messages;
-      $("stat-failed").textContent = stats.failed;
-      $("stat-tokens").textContent = Number(stats.tokens).toLocaleString();
+      animateCount($("stat-users"), stats.users);
+      animateCount($("stat-messages"), stats.messages);
+      animateCount($("stat-failed"), stats.failed);
+      animateCount($("stat-tokens"), stats.tokens);
       renderTrend(trend);
       const modeText = stats.single_user_mode
         ? "单用户模式"
         : stats.mode === "managed" ? "统一管理模式" : "用户自足模式";
-      $("last-updated").textContent = modeText + " · 更新于 " + new Date().toLocaleTimeString("zh-CN", { hour12: false });
+      $("last-updated").innerHTML =
+        '<span class="pulse"></span>' + modeText + " · 更新于 " + new Date().toLocaleTimeString("zh-CN", { hour12: false });
     } catch (ex) {
       toast(ex.message, true);
     }

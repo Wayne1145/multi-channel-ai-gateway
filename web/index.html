@@ -11,10 +11,10 @@
 <!-- 登录视图 -->
 <div id="login" class="login-wrap">
   <form id="login-form" class="login-card" autocomplete="off">
-    <div class="brand brand-lg">Tsukuyomi</div>
+    <div class="brand brand-lg"><span class="brand-mark">T</span>Tsukuyomi</div>
     <div class="login-sub">AI Gateway · 管理后台</div>
     <input id="token-input" type="password" class="field" placeholder="管理员令牌" required>
-    <button type="submit" class="btn btn-block" id="login-btn">进入后台</button>
+    <button type="submit" class="btn btn-block btn-primary" id="login-btn">进入后台</button>
     <p class="login-hint">令牌仅保存在本浏览器会话中</p>
     <p id="login-error" class="login-error hidden"></p>
   </form>
@@ -23,37 +23,72 @@
 <!-- 应用视图 -->
 <div id="app" class="app hidden">
   <aside class="sidebar">
-    <div class="brand">Tsukuyomi<small>AI Gateway</small></div>
+    <div class="brand"><span class="brand-mark">T</span>Tsukuyomi<small>AI Gateway</small></div>
     <nav class="nav">
-      <button class="nav-item active" data-view="dashboard">仪表盘</button>
-      <button class="nav-item" data-view="users">用户</button>
-      <button class="nav-item" data-view="instances">渠道实例</button>
-      <button class="nav-item" data-view="media">媒体审计</button>
-      <button class="nav-item" data-view="messages">消息</button>
-      <button class="nav-item" data-view="tasks">死信任务</button>
+      <button class="nav-item active" data-view="dashboard">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg>
+        仪表盘
+      </button>
+      <button class="nav-item" data-view="users">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3.2"/><path d="M3.5 20c.6-3.4 2.8-5 5.5-5s4.9 1.6 5.5 5"/><circle cx="17" cy="9" r="2.4"/><path d="M16 15.4c2.6.2 4.3 1.6 4.8 4.6"/></svg>
+        用户
+      </button>
+      <button class="nav-item" data-view="instances">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></svg>
+        渠道实例
+      </button>
+      <button class="nav-item" data-view="media">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="8.5" cy="10" r="1.4"/><path d="M3 16l5-4 4 3 3-2 6 5"/></svg>
+        媒体审计
+      </button>
+      <button class="nav-item" data-view="messages">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-9-9"/><path d="M21 3v6h-6"/></svg>
+        消息
+      </button>
+      <button class="nav-item" data-view="tasks">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4M5 5l2.5 2.5M16.5 16.5 19 19M19 5l-2.5 2.5M7.5 16.5 5 19"/></svg>
+        死信任务
+      </button>
     </nav>
     <button id="logout" class="btn btn-ghost sidebar-foot">退出登录</button>
   </aside>
 
   <main class="content">
     <header class="topbar">
-      <h1 id="page-title">仪表盘</h1>
+      <div>
+        <h1 id="page-title">仪表盘</h1>
+      </div>
       <div class="topbar-actions">
         <span id="last-updated" class="muted small"></span>
-        <button id="refresh" class="btn">刷新</button>
+        <button id="refresh" class="btn btn-ghost btn-sm">刷新</button>
       </div>
     </header>
 
     <!-- 仪表盘 -->
     <section id="view-dashboard" class="view">
       <div class="stat-grid">
-        <article class="stat-card"><b id="stat-users">–</b><span>用户</span></article>
-        <article class="stat-card"><b id="stat-messages">–</b><span>消息</span></article>
-        <article class="stat-card"><b id="stat-failed">–</b><span>失败消息</span></article>
-        <article class="stat-card"><b id="stat-tokens">–</b><span>Token 用量</span></article>
+        <article class="stat-card">
+          <span class="stat-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="9" cy="8" r="3.2"/><path d="M3.5 20c.6-3.4 2.8-5 5.5-5s4.9 1.6 5.5 5"/></svg></span>
+          <b id="stat-users">–</b><span>用户</span>
+        </article>
+        <article class="stat-card">
+          <span class="stat-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M21 12a9 9 0 1 1-9-9"/><path d="M21 3v6h-6"/></svg></span>
+          <b id="stat-messages">–</b><span>消息</span>
+        </article>
+        <article class="stat-card">
+          <span class="stat-ico" style="color: var(--danger); background: rgba(255,77,109,.1);"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg></span>
+          <b id="stat-failed">–</b><span>失败消息</span>
+        </article>
+        <article class="stat-card">
+          <span class="stat-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M13 3 5 13h6l-1 8 8-10h-6z"/></svg></span>
+          <b id="stat-tokens">–</b><span>Token 用量</span>
+        </article>
       </div>
       <div class="card">
-        <div class="card-head"><h2>近 7 日 Token 用量</h2></div>
+        <div class="card-head">
+          <h2>近 7 日 Token 用量</h2>
+          <span id="trend-badge" class="badge badge-ok"><span class="dot"></span>实时</span>
+        </div>
         <div id="trend" class="trend"></div>
       </div>
     </section>
@@ -85,7 +120,7 @@
             </select>
             <input id="inst-name" class="field field-sm" placeholder="实例名称（必填）" style="min-width: 180px;">
             <input id="inst-owner" class="field field-sm" placeholder="所有者用户 ID（可选）" style="min-width: 200px;">
-            <button id="inst-create" class="btn btn-sm">创建</button>
+            <button id="inst-create" class="btn btn-sm btn-primary">创建</button>
           </div>
         </div>
         <div class="table-wrap">
@@ -164,7 +199,7 @@
   <div class="modal modal-lg">
     <div class="modal-head">
       <h2 id="user-modal-title">用户详情</h2>
-      <button class="btn btn-ghost" id="user-modal-close">关闭</button>
+      <button class="btn btn-ghost btn-sm" id="user-modal-close">关闭</button>
     </div>
     <div id="user-detail-grid" class="detail-grid"></div>
     <div class="modal-section">
