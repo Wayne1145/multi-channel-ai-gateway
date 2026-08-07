@@ -24,4 +24,4 @@ jobs:
       - name: 运行测试与覆盖率检查
         run: uv run pytest --cov=wecom_ai_gateway --cov-report=term-missing
       - name: 构建容器镜像
-        run: docker build -t wecom-ai-gateway:test .
+        run: docker build -t multi-channel-ai-gateway:test .
