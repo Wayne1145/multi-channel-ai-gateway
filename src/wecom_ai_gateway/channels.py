@@ -46,8 +46,8 @@ class ChannelAdapter(ABC):
     channel_key: str
 
     @abstractmethod
-    async def start_instance(self, instance_id: str) -> None:
-        """启动指定渠道实例。"""
+    async def start_instance(self, instance_id: str) -> dict:
+        """启动指定渠道实例，并返回可安全公开的登录状态。"""
 
     @abstractmethod
     async def stop_instance(self, instance_id: str) -> None:

@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Tsukuyomi AI Gateway · 管理后台</title>
-<link rel="stylesheet" href="/static/app.css?v=2">
+<link rel="stylesheet" href="/static/app.css?v=3">
 </head>
 <body>
 
@@ -12,10 +12,13 @@
 <div id="login" class="login-wrap">
   <form id="login-form" class="login-card" autocomplete="off">
     <div class="brand brand-lg"><span class="brand-mark">T</span>Tsukuyomi</div>
-    <div class="login-sub">AI Gateway · 管理后台</div>
-    <input id="token-input" type="password" class="field" placeholder="管理员令牌" required>
-    <button type="submit" class="btn btn-block btn-primary" id="login-btn">进入后台</button>
-    <p class="login-hint">令牌仅保存在本浏览器会话中</p>
+    <div class="login-sub">AI Gateway · 账户中心</div>
+    <input id="username-input" class="field" placeholder="账号" autocomplete="username" required>
+    <input id="password-input" type="password" class="field" placeholder="密码" autocomplete="current-password" required>
+    <input id="display-name-input" class="field hidden" placeholder="显示名称（可选）" autocomplete="name">
+    <button type="submit" class="btn btn-block btn-primary" id="login-btn">登录</button>
+    <button type="button" class="btn btn-block btn-ghost hidden" id="register-toggle">注册账户</button>
+    <p class="login-hint">会话令牌仅保存在本浏览器会话中</p>
     <p id="login-error" class="login-error hidden"></p>
   </form>
 </div>
@@ -29,7 +32,7 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg>
         仪表盘
       </button>
-      <button class="nav-item" data-view="users">
+      <button class="nav-item admin-only" data-view="users">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3.2"/><path d="M3.5 20c.6-3.4 2.8-5 5.5-5s4.9 1.6 5.5 5"/><circle cx="17" cy="9" r="2.4"/><path d="M16 15.4c2.6.2 4.3 1.6 4.8 4.6"/></svg>
         用户
       </button>
@@ -37,15 +40,15 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></svg>
         渠道实例
       </button>
-      <button class="nav-item" data-view="media">
+      <button class="nav-item admin-only" data-view="media">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="8.5" cy="10" r="1.4"/><path d="M3 16l5-4 4 3 3-2 6 5"/></svg>
         媒体审计
       </button>
-      <button class="nav-item" data-view="messages">
+      <button class="nav-item admin-only" data-view="messages">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-9-9"/><path d="M21 3v6h-6"/></svg>
         消息
       </button>
-      <button class="nav-item" data-view="tasks">
+      <button class="nav-item admin-only" data-view="tasks">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4M5 5l2.5 2.5M16.5 16.5 19 19M19 5l-2.5 2.5M7.5 16.5 5 19"/></svg>
         死信任务
       </button>
@@ -119,7 +122,7 @@
               <option value="wechat_clawbot">微信 ClawBot</option>
             </select>
             <input id="inst-name" class="field field-sm" placeholder="实例名称（必填）" style="min-width: 180px;">
-            <input id="inst-owner" class="field field-sm" placeholder="所有者用户 ID（可选）" style="min-width: 200px;">
+            <input id="inst-owner" class="field field-sm admin-only" placeholder="所有者用户 ID（可选）" style="min-width: 200px;">
             <button id="inst-create" class="btn btn-sm btn-primary">创建</button>
           </div>
         </div>
@@ -194,6 +197,19 @@
 
 <div id="toast" class="toast hidden"></div>
 
+<!-- 微信扫码登录弹窗 -->
+<div id="qrcode-modal" class="modal-mask hidden">
+  <div class="modal qrcode-modal">
+    <div class="modal-head">
+      <h2>微信 ClawBot 扫码登录</h2>
+      <button class="btn btn-ghost btn-sm" id="qrcode-close">关闭</button>
+    </div>
+    <div id="qrcode-loading" class="muted">正在生成安全二维码…</div>
+    <img id="qrcode-image" class="qrcode-image hidden" alt="微信 ClawBot 登录二维码">
+    <p class="muted small modal-foot">请使用隔离微信小号扫码。二维码临时有效，不会保存到浏览器缓存。</p>
+  </div>
+</div>
+
 <!-- 用户详情弹窗（管理端不解密内容） -->
 <div id="user-modal" class="modal-mask hidden">
   <div class="modal modal-lg">
@@ -202,6 +218,15 @@
       <button class="btn btn-ghost btn-sm" id="user-modal-close">关闭</button>
     </div>
     <div id="user-detail-grid" class="detail-grid"></div>
+    <div class="modal-section">
+      <h3>登录账号</h3>
+      <div class="filters" style="flex-wrap: wrap; row-gap: 8px;">
+        <input id="account-username" class="field field-sm" placeholder="登录账号" autocomplete="off">
+        <input id="account-password" type="password" class="field field-sm" placeholder="新密码（至少 10 位）" autocomplete="new-password">
+        <button id="account-save" class="btn btn-sm btn-primary">分配 / 重置账号</button>
+      </div>
+      <p class="muted small">密码不会回显；重置后，该用户已有登录会话会立即失效。</p>
+    </div>
     <div class="modal-section">
       <h3>角色卡</h3>
       <div class="table-wrap">
@@ -242,6 +267,6 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=2"></script>
+<script src="/static/app.js?v=5"></script>
 </body>
 </html>

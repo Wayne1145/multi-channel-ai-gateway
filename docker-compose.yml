@@ -21,6 +21,22 @@ services:
     depends_on:
       postgres: {condition: service_healthy}
       redis: {condition: service_healthy}
+  clawbot-bridge:
+    profiles: ["clawbot"]
+    build: ./bridge
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      GATEWAY_BASE_URL: http://api:8080
+      STATE_DIR: /data
+    volumes: ["./data/clawbot-bridge:/data"]
+    depends_on:
+      api: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8787/health',timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
   postgres:
     image: pgvector/pgvector:pg16
     restart: unless-stopped

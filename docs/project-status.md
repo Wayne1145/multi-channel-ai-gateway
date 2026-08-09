@@ -29,6 +29,8 @@ PNG 角色卡导入、媒体安全生命周期、用户详情管理 API、模式
 - `single`、`self_service`、`managed` 模式及命令策略覆盖（含静默禁用）；
 - 模式切换迁移服务 `migration.migrate_user_mode`：审计轨迹 + 用户数据规模摘要；
 - 管理统计、用户模式、死信重放、封禁与最小化用户数据视图。
+- 管理员/普通用户双角色账号中心：scrypt 密码、摘要化会话、封禁/重置撤销会话；
+  普通用户仅通过租户约束的 `/api/me/*` 管理自己的摘要和 ClawBot 实例；公开注册默认关闭。
 
 ### 媒体消息安全生命周期（新增）
 
@@ -41,21 +43,24 @@ PNG 角色卡导入、媒体安全生命周期、用户详情管理 API、模式
 ### P1 多渠道基础
 
 - 渠道适配器协议与进程内注册表；新渠道只能通过统一 `ChannelMessage` / `OutgoingMessage` 进入服务层；
-- `wechat_clawbot` HTTP 桥接适配器；管理 API：渠道实例创建、查询、启动、停止；
+- `wechat_clawbot` HTTP 桥接适配器；管理员与实例所有者可创建、查询、启停实例，并通过鉴权 SVG 在站内扫码；
 - 独立桥接 Bearer 鉴权；桥接入站幂等，复用既有用户隔离、会话、Outbox 和模型流水线；
+- 仓库内置可选 Python Bridge：文本收发、多实例独立游标、精确回复上下文、Fernet 加密会话及进程启动自动恢复；
 - 管理后台新增：渠道实例面板（创建/启停）、媒体审计、用户详情（卡/预设/BYOK/策略/统计）。
 
 ## 已验证
 
-- 单元、API、安全、回调、隔离、Outbox、渠道、媒体、迁移测试（本地全量 69 项）；
+- 网关单元、API、安全、回调、隔离、Outbox、渠道、媒体、账号中心及迁移测试（本地全量 94 项）；
+- Bridge 独立测试 29 项，公开镜像构建与非 root 导入验证通过；
 - Ruff 与 Python `compileall` 静态检查；`git diff --check`；
-- 生产 PostgreSQL 迁移链升级至 0006（media_assets），容器 healthy；
+- 生产 PostgreSQL 迁移链升级至 0007（accounts/auth_sessions），容器 healthy；
+- 隔离微信小号完成扫码、文本入站、模型回复、出站实际收件；Bridge 重启后从密文恢复 `online`，无需重扫；
 - `pip-audit` 无已知漏洞（v0.3.0 审计修复）。
 
 ## 尚未完成或尚未真实联调
 
-- 真实 ClawBot/微信 Agent 的隔离测试实例联调；个人微信渠道存在平台规则与账号风险，默认保持禁用；
-- 图片/语音/文件的实际发送（出站媒体上传渠道 media_id）与人工客服接管；
+- ClawBot 图片/语音/文件协议收发、多实例并发与长时间稳定性；个人微信渠道存在平台规则与账号风险，默认保持禁用；
+- 人工客服接管；
 - 企业微信发送失败事件闭环；高并发、断网、Redis/PostgreSQL 故障注入及多 Worker 长稳测试；
 - Anthropic、Gemini、Ollama、Dify 等 Provider；BYOK 网页绑定页；
 - 多租户组织、细粒度 RBAC、计费、知识库、MCP/插件、更多渠道和高可用部署。

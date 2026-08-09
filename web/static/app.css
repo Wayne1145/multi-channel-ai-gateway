@@ -373,6 +373,17 @@ select.field { cursor: pointer; }
 .detail-item b { display: block; font-size: 18px; font-weight: 700; font-variant-numeric: tabular-nums; }
 .detail-item span { color: var(--muted); font-size: 11px; }
 .modal-foot { margin-top: 16px; text-align: center; }
+.qrcode-modal { max-width: 390px; text-align: center; }
+.qrcode-image {
+  display: block;
+  width: min(280px, 80vw);
+  height: min(280px, 80vw);
+  margin: 8px auto 0;
+  padding: 12px;
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+}
 
 /* ---------- Skeleton（加载占位） ---------- */
 .skeleton { position: relative; overflow: hidden; border-radius: var(--r-sm); background: var(--surface-2); }

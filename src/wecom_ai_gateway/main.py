@@ -1,15 +1,20 @@
 import logging
 from datetime import UTC, datetime, timedelta
+from io import BytesIO
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlsplit
 
+import qrcode
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from sqlalchemy import func, or_, select
+from qrcode.image.svg import SvgPathImage
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.orm import Session
 
+from .auth import Principal, create_session, login, normalize_username, principal_from_bearer, revoke_session
 from .cards import detect_format, encrypt_card_content, extract_card_from_png
 from .channels import ChannelMessage, registry
 from .clawbot import register_clawbot_adapter
@@ -18,6 +23,8 @@ from .db import SessionLocal, session_scope
 from .media import list_media_metadata
 from .migration import migrate_user_mode
 from .models import (
+    Account,
+    AuthSession,
     ChannelInstance,
     CharacterCard,
     CommandPolicy,
@@ -38,7 +45,7 @@ from .models import (
 from .policy import resolve_user_mode
 from .queueing import enqueue_sync
 from .redaction import redact_error
-from .security import verify_admin_token
+from .security import hash_password, verify_admin_token
 from .services import ingest_channel_message
 from .tasks import replay_task
 from .wecom import decrypt, parse_callback, verify_signature
@@ -55,9 +62,33 @@ app.mount("/static", StaticFiles(directory=web / "static"), name="static")
 register_clawbot_adapter()
 
 
-def admin(x_admin_token: str | None = Header(None)):
-    if not verify_admin_token(x_admin_token):
-        raise HTTPException(401, "invalid admin token")
+def db_dep():
+    yield from session_scope()
+
+
+def admin(
+    x_admin_token: str | None = Header(None),
+    authorization: str | None = Header(None),
+    db: Session = Depends(db_dep),
+):
+    principal = principal_from_bearer(db, authorization)
+    if not verify_admin_token(x_admin_token) and not (principal and principal.role == "admin"):
+        raise HTTPException(401, "invalid admin credentials")
+
+
+def current_principal(
+    authorization: str | None = Header(None), db: Session = Depends(db_dep)
+) -> Principal:
+    principal = principal_from_bearer(db, authorization)
+    if not principal:
+        raise HTTPException(401, "invalid or expired session")
+    return principal
+
+
+def current_user(principal: Principal = Depends(current_principal)) -> Principal:
+    if principal.role != "user" or not principal.user_id:
+        raise HTTPException(403, "user session required")
+    return principal
 
 
 def bridge_auth(authorization: str | None = Header(default=None)) -> None:
@@ -67,10 +98,6 @@ def bridge_auth(authorization: str | None = Header(default=None)) -> None:
         raise HTTPException(503, "channel bridge token is not configured")
     if authorization != f"Bearer {token}":
         raise HTTPException(401, "invalid channel bridge token")
-
-
-def db_dep():
-    yield from session_scope()
 
 
 @app.get("/health")
@@ -97,6 +124,129 @@ async def callback(request: Request, msg_signature: str, timestamp: str, nonce: 
 @app.get("/", response_class=HTMLResponse)
 def dashboard():
     return (web / "index.html").read_text(encoding="utf-8")
+
+
+class LoginIn(BaseModel):
+    username: str
+    password: str
+
+
+class RegisterIn(LoginIn):
+    display_name: str | None = None
+
+
+class AccountProvisionIn(LoginIn):
+    pass
+
+
+@app.get("/api/auth/config")
+def auth_config(db: Session = Depends(db_dep)):
+    return {
+        "registration_enabled": settings.allow_public_registration
+        and not settings.single_user_mode
+        and resolve_user_mode(db, None) == "self_service"
+    }
+
+
+@app.post("/api/auth/login")
+def auth_login(body: LoginIn, db: Session = Depends(db_dep)):
+    try:
+        result = login(db, body.username, body.password)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if not result:
+        raise HTTPException(401, "账号或密码错误")
+    token, principal = result
+    return {
+        "token": token,
+        "role": principal.role,
+        "user_id": principal.user_id,
+        "username": principal.username,
+    }
+
+
+@app.post("/api/auth/register")
+def auth_register(body: RegisterIn, db: Session = Depends(db_dep)):
+    if (
+        not settings.allow_public_registration
+        or settings.single_user_mode
+        or resolve_user_mode(db, None) != "self_service"
+    ):
+        raise HTTPException(403, "当前平台未开放用户注册")
+    try:
+        username = normalize_username(body.username)
+        password_hash = hash_password(body.password)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if username == settings.admin_username.strip().lower():
+        raise HTTPException(409, "用户名已存在")
+    if db.scalar(select(Account).where(Account.username == username)):
+        raise HTTPException(409, "用户名已存在")
+    user = User(display_name=(body.display_name or username).strip()[:255], mode="self_service")
+    db.add(user)
+    db.flush()
+    account = Account(
+        user_id=user.id,
+        username=username,
+        password_hash=password_hash,
+        role="user",
+    )
+    db.add(account)
+    db.flush()
+    token = create_session(db, role="user", user_id=user.id, account_id=account.id)
+    return {"token": token, "role": "user", "user_id": user.id, "username": username}
+
+
+@app.post("/api/auth/logout")
+def auth_logout(authorization: str | None = Header(None), db: Session = Depends(db_dep)):
+    revoke_session(db, authorization)
+    return {"ok": True}
+
+
+@app.get("/api/auth/me")
+def auth_me(principal: Principal = Depends(current_principal)):
+    return {
+        "role": principal.role,
+        "user_id": principal.user_id,
+        "username": principal.username,
+    }
+
+
+@app.get("/api/me/summary")
+def my_summary(
+    principal: Principal = Depends(current_user), db: Session = Depends(db_dep)
+):
+    assert principal.user_id is not None
+    user_id = principal.user_id
+    user = db.get(User, user_id)
+    if not user:
+        raise HTTPException(404, "user not found")
+
+    def count(model, condition) -> int:
+        return int(db.scalar(select(func.count()).select_from(model).where(condition)) or 0)
+
+    tokens = db.scalar(
+        select(
+            func.coalesce(func.sum(UsageRecord.prompt_tokens + UsageRecord.completion_tokens), 0)
+        ).where(UsageRecord.user_id == user_id)
+    )
+    media = db.scalar(
+        select(func.count()).select_from(MediaAsset)
+        .join(Message, Message.id == MediaAsset.message_id)
+        .where(Message.user_id == user_id)
+    )
+    return {
+        "user_id": user_id,
+        "display_name": user.display_name,
+        "mode": resolve_user_mode(db, user),
+        "conversations": count(Conversation, Conversation.user_id == user_id),
+        "memories": count(Memory, Memory.user_id == user_id),
+        "media_assets": int(media or 0),
+        "tokens_total": int(tokens or 0),
+        "cards": count(CharacterCard, CharacterCard.user_id == user_id),
+        "presets": count(Preset, Preset.user_id == user_id),
+        "providers": count(UserProvider, UserProvider.user_id == user_id),
+    }
 
 
 @app.get("/api/admin/stats", dependencies=[Depends(admin)])
@@ -141,8 +291,9 @@ def usage_trend(db: Session = Depends(db_dep), days: int = 7):
 @app.get("/api/admin/users", dependencies=[Depends(admin)])
 def users(db: Session = Depends(db_dep), limit: int = 50):
     rows = db.execute(
-        select(User, UserSettings)
+        select(User, UserSettings, Account)
         .outerjoin(UserSettings)
+        .outerjoin(Account, Account.user_id == User.id)
         .order_by(User.created_at.desc())
         .limit(min(limit, 200))
     ).all()
@@ -155,9 +306,48 @@ def users(db: Session = Depends(db_dep), limit: int = 50):
             "model": s.model if s else None,
             "mode": u.mode,
             "effective_mode": resolve_user_mode(db, u),
+            "account_username": a.username if a else None,
         }
-        for u, s in rows
+        for u, s, a in rows
     ]
+
+
+@app.put("/api/admin/users/{user_id}/account", dependencies=[Depends(admin)])
+def provision_user_account(
+    user_id: str, body: AccountProvisionIn, db: Session = Depends(db_dep)
+):
+    user = db.get(User, user_id)
+    if not user:
+        raise HTTPException(404, "user not found")
+    try:
+        username = normalize_username(body.username)
+        password_hash = hash_password(body.password)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if username == settings.admin_username.strip().lower():
+        raise HTTPException(409, "用户名已存在")
+    conflict = db.scalar(
+        select(Account).where(Account.username == username, Account.user_id != user_id)
+    )
+    if conflict:
+        raise HTTPException(409, "用户名已存在")
+    account = db.scalar(select(Account).where(Account.user_id == user_id))
+    if account:
+        account.username = username
+        account.password_hash = password_hash
+        account.is_active = True
+        db.execute(delete(AuthSession).where(AuthSession.account_id == account.id))
+    else:
+        account = Account(
+            user_id=user_id,
+            username=username,
+            password_hash=password_hash,
+            role="user",
+            is_active=True,
+        )
+        db.add(account)
+    db.commit()
+    return {"user_id": user_id, "username": username, "is_active": True}
 
 
 @app.post("/api/admin/users/{user_id}/block", dependencies=[Depends(admin)])
@@ -166,6 +356,8 @@ def block_user(user_id: str, blocked: bool = True, db: Session = Depends(db_dep)
     if not u:
         raise HTTPException(404, "user not found")
     u.is_blocked = blocked
+    if blocked:
+        db.execute(delete(AuthSession).where(AuthSession.user_id == user_id))
     db.commit()
     return {"ok": True, "blocked": u.is_blocked}
 
@@ -254,9 +446,18 @@ class ChannelMessageIn(BaseModel):
     raw: dict = {}
 
 
+class ChannelStatusIn(BaseModel):
+    """桥接服务上报的非敏感实例状态；额外字段会被忽略。"""
+
+    status: Literal["pending_login", "online", "offline", "error"]
+    qrcode_url: str | None = None
+    account_id: str | None = None
+    error: str | None = None
+
+
 def _channel_instance_view(instance: ChannelInstance) -> dict:
     """管理端只返回非敏感元数据，绝不返回 session_encrypted/login_state 原文。"""
-    return {
+    result = {
         "id": instance.id,
         "channel": instance.channel,
         "instance_name": instance.instance_name,
@@ -266,6 +467,17 @@ def _channel_instance_view(instance: ChannelInstance) -> dict:
         "created_at": instance.created_at,
         "updated_at": instance.updated_at,
     }
+    safe_login = {
+        key: value
+        for key, value in (instance.login_state or {}).items()
+        if key in {"status", "qrcode_url", "account_id", "error"}
+    }
+    if safe_login.get("qrcode_url"):
+        safe_login["qrcode_available"] = True
+        safe_login.pop("qrcode_url", None)
+    if safe_login:
+        result["login"] = safe_login
+    return result
 
 
 @app.get("/api/admin/channel-instances", dependencies=[Depends(admin)])
@@ -310,11 +522,20 @@ async def _change_channel_instance_status(instance_id: str, action: Literal["sta
             if action == "start":
                 instance.status = "logging_in"
                 db.commit()
-                await adapter.start_instance(instance.id)
-                instance.status = "online"
+                bridge_state = await adapter.start_instance(instance.id)
+                safe_login = {
+                    key: value
+                    for key, value in (bridge_state or {}).items()
+                    if key in {"status", "qrcode_url", "account_id", "error"}
+                }
+                instance.login_state = safe_login
+                instance.status = (
+                    "online" if safe_login.get("status") == "online" else "logging_in"
+                )
             else:
                 await adapter.stop_instance(instance.id)
                 instance.status = "offline"
+                instance.login_state = {}
             db.commit()
         except Exception as exc:
             db.rollback()
@@ -344,6 +565,122 @@ async def stop_channel_instance(instance_id: str):
     return await _change_channel_instance_status(instance_id, "stop")
 
 
+class MyChannelInstanceIn(BaseModel):
+    instance_name: str
+
+
+def _owned_instance(db: Session, instance_id: str, user_id: str) -> ChannelInstance:
+    instance = db.scalar(
+        select(ChannelInstance).where(
+            ChannelInstance.id == instance_id,
+            ChannelInstance.owner_user_id == user_id,
+        )
+    )
+    if not instance:
+        raise HTTPException(404, "channel instance not found")
+    return instance
+
+
+def _qrcode_response(instance: ChannelInstance) -> Response:
+    qrcode_url = (instance.login_state or {}).get("qrcode_url")
+    if not qrcode_url:
+        raise HTTPException(404, "login qrcode is not available")
+    parsed = urlsplit(qrcode_url)
+    if parsed.scheme != "https" or not parsed.netloc or parsed.username or parsed.password:
+        raise HTTPException(404, "login qrcode is not available")
+    output = BytesIO()
+    qrcode.make(qrcode_url, image_factory=SvgPathImage).save(output)
+    return Response(
+        output.getvalue(),
+        media_type="image/svg+xml",
+        headers={"Cache-Control": "no-store, private"},
+    )
+
+
+@app.get("/api/admin/channel-instances/{instance_id}/qrcode", dependencies=[Depends(admin)])
+def admin_channel_instance_qrcode(instance_id: str, db: Session = Depends(db_dep)):
+    instance = db.get(ChannelInstance, instance_id)
+    if not instance:
+        raise HTTPException(404, "channel instance not found")
+    return _qrcode_response(instance)
+
+
+@app.get("/api/me/channel-instances")
+def my_channel_instances(
+    principal: Principal = Depends(current_user), db: Session = Depends(db_dep)
+):
+    assert principal.user_id is not None
+    rows = db.scalars(
+        select(ChannelInstance)
+        .where(ChannelInstance.owner_user_id == principal.user_id)
+        .order_by(ChannelInstance.created_at.desc())
+    )
+    return [_channel_instance_view(row) for row in rows]
+
+
+@app.post("/api/me/channel-instances")
+def create_my_channel_instance(
+    body: MyChannelInstanceIn,
+    principal: Principal = Depends(current_user),
+    db: Session = Depends(db_dep),
+):
+    assert principal.user_id is not None
+    name = body.instance_name.strip()[:120]
+    if not name:
+        raise HTTPException(400, "instance_name is required")
+    instance = ChannelInstance(
+        channel="wechat_clawbot",
+        instance_name=name,
+        owner_user_id=principal.user_id,
+        config={},
+        login_state={},
+        status="offline",
+    )
+    db.add(instance)
+    try:
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(409, "实例名称已存在") from exc
+    db.refresh(instance)
+    return _channel_instance_view(instance)
+
+
+@app.post("/api/me/channel-instances/{instance_id}/start")
+async def start_my_channel_instance(
+    instance_id: str,
+    principal: Principal = Depends(current_user),
+    db: Session = Depends(db_dep),
+):
+    assert principal.user_id is not None
+    _owned_instance(db, instance_id, principal.user_id)
+    result = await _change_channel_instance_status(instance_id, "start")
+    result.get("login", {}).pop("qrcode_url", None)
+    return result
+
+
+@app.post("/api/me/channel-instances/{instance_id}/stop")
+async def stop_my_channel_instance(
+    instance_id: str,
+    principal: Principal = Depends(current_user),
+    db: Session = Depends(db_dep),
+):
+    assert principal.user_id is not None
+    _owned_instance(db, instance_id, principal.user_id)
+    return await _change_channel_instance_status(instance_id, "stop")
+
+
+@app.get("/api/me/channel-instances/{instance_id}/qrcode")
+def my_channel_instance_qrcode(
+    instance_id: str,
+    principal: Principal = Depends(current_user),
+    db: Session = Depends(db_dep),
+):
+    assert principal.user_id is not None
+    instance = _owned_instance(db, instance_id, principal.user_id)
+    return _qrcode_response(instance)
+
+
 @app.post("/api/internal/channel-instances/{instance_id}/messages", dependencies=[Depends(bridge_auth)])
 def receive_channel_message(instance_id: str, body: ChannelMessageIn, db: Session = Depends(db_dep)):
     """受保护的桥接入口：复用统一身份映射与消息 Outbox，不暴露给终端用户。"""
@@ -367,6 +704,25 @@ def receive_channel_message(instance_id: str, body: ChannelMessageIn, db: Sessio
     )
     db.commit()
     return {"ok": True, "accepted": message is not None, "message_id": message.id if message else None}
+
+
+@app.post("/api/internal/channel-instances/{instance_id}/status", dependencies=[Depends(bridge_auth)])
+def receive_channel_status(instance_id: str, body: ChannelStatusIn, db: Session = Depends(db_dep)):
+    """接受桥接侧生命周期回调；仅保存白名单状态，不接受任何会话凭据。"""
+    instance = db.get(ChannelInstance, instance_id)
+    if not instance:
+        raise HTTPException(404, "channel instance not found")
+    state = body.model_dump(exclude_none=True)
+    qrcode_url = state.get("qrcode_url")
+    if qrcode_url:
+        parsed = urlsplit(qrcode_url)
+        if parsed.scheme != "https" or not parsed.netloc or parsed.username or parsed.password:
+            state.pop("qrcode_url", None)
+    instance.login_state = state
+    instance.status = "logging_in" if body.status == "pending_login" else body.status
+    db.commit()
+    db.refresh(instance)
+    return _channel_instance_view(instance)
 
 
 @app.get("/api/admin/mode", dependencies=[Depends(admin)])

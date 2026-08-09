@@ -11,6 +11,8 @@ class Settings(BaseSettings):
     database_url: str = "sqlite:///./data/dev.db"
     redis_url: str = "redis://localhost:6379/0"
     admin_token: str = "dev-admin-token"
+    admin_username: str = "admin"
+    auth_session_days: int = 7
     identity_hmac_key: str = "dev-identity-hmac-key-change-me"
     secret_encryption_key: str = ""
     wecom_corp_id: str = ""
@@ -45,6 +47,8 @@ class Settings(BaseSettings):
     clawbot_request_timeout_seconds: int = 30
     # 平台默认运行模式：self_service（用户自足）| managed（统一管理）
     platform_mode: str = "self_service"
+    # 公开注册默认关闭；管理员可为既有聊天用户分配登录账号。
+    allow_public_registration: bool = False
     # 全局单用户开关：true 时忽略平台/用户模式，一切指令放行（.env 手动开启）
     single_user_mode: bool = False
     # 媒体消息安全生命周期：白名单、大小上限、保留时长（小时）。

@@ -23,5 +23,13 @@ jobs:
         run: uv run ruff check src tests
       - name: 运行测试与覆盖率检查
         run: uv run pytest --cov=wecom_ai_gateway --cov-report=term-missing
+      - name: 安装并测试可选 ClawBot Bridge
+        run: |
+          cd bridge
+          uv sync --extra dev
+          uv run ruff check src tests
+          uv run pytest
       - name: 构建容器镜像
         run: docker build -t multi-channel-ai-gateway:test .
+      - name: 构建 ClawBot Bridge 镜像
+        run: docker build -t multi-channel-clawbot-bridge:test bridge

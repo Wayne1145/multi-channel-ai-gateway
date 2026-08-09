@@ -17,6 +17,17 @@
 
 微信客服协议实现依据企业微信官方公开 API 的参数和行为，包括回调加解密、`sync_msg`、`send_msg` 与 access token 接口。企业微信及微信相关名称和商标归其权利人所有，本项目与腾讯或企业微信不存在官方隶属或背书关系。
 
+可选 ClawBot Bridge 的 iLink HTTP/JSON 契约依据腾讯发布的 npm 包
+[`@tencent-weixin/openclaw-weixin` 2.4.6](https://www.npmjs.com/package/@tencent-weixin/openclaw-weixin)。
+该包声明为 MIT License，Copyright (C) 2026 Tencent；许可证原文副本保存在
+[`bridge/third_party/tencent-openclaw-weixin-LICENSE`](bridge/third_party/tencent-openclaw-weixin-LICENSE)。
+Bridge 使用相同的公开端点、请求头和 JSON 字段以实现协议互操作，但 FastAPI 服务、网关适配、
+多实例状态、加密持久化、租户上下文映射与 Python 测试均由本项目独立实现。
+
+早期调研曾阅读 `SiverKing/weixin-ClawBot-API`，但该仓库没有明确开源许可证。发布前已执行
+源码相似性与人工来源审计；本仓库不包含该项目源码，也不以其为运行时依赖。协议层公开版本按
+腾讯 MIT 包重新实现。该调研项目不属于本项目的授权来源。
+
 ## 软件包依赖
 
 Python 与容器依赖通过 `pyproject.toml`、`uv.lock` 和基础镜像声明，由各自作者按各自许可证发布。本项目的 Apache-2.0 许可证仅覆盖本项目原创代码，不改变第三方依赖的许可证。

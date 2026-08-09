@@ -7,16 +7,22 @@
     String(s ?? "").replace(/[&<>"']/g, (c) =>
       ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
-  const TOKEN_KEY = "adminToken";
+  const TOKEN_KEY = "sessionToken";
+  const AUTH_KEY = "sessionPrincipal";
   let token = sessionStorage.getItem(TOKEN_KEY) || "";
+  let principal = JSON.parse(sessionStorage.getItem(AUTH_KEY) || "null");
+  let registering = false;
 
   /* ---------- 基础请求 ---------- */
   async function api(path, opts = {}) {
-    const headers = Object.assign({ "X-Admin-Token": token }, opts.headers || {});
+    const headers = Object.assign(
+      token ? { "Authorization": `Bearer ${token}` } : {},
+      opts.headers || {},
+    );
     const res = await fetch(path, Object.assign({}, opts, { headers }));
     if (res.status === 401) {
       logout();
-      throw new Error("登录已失效，请重新输入管理员令牌");
+      throw new Error("登录已失效，请重新登录");
     }
     if (!res.ok) {
       const body = await res.json().catch(() => ({}));
@@ -57,16 +63,20 @@
 
   /* ---------- 登录 / 退出 ---------- */
   function enterApp() {
+    document.querySelectorAll(".admin-only").forEach((el) =>
+      el.classList.toggle("hidden", principal?.role !== "admin"));
     $("login").classList.add("hidden");
     $("app").classList.remove("hidden");
     switchView("dashboard");
   }
   function logout() {
     sessionStorage.removeItem(TOKEN_KEY);
+    sessionStorage.removeItem(AUTH_KEY);
     token = "";
+    principal = null;
     $("app").classList.add("hidden");
     $("login").classList.remove("hidden");
-    $("token-input").value = "";
+    $("password-input").value = "";
     $("login-error").classList.add("hidden");
   }
 
@@ -74,13 +84,24 @@
     e.preventDefault();
     const btn = $("login-btn");
     const err = $("login-error");
-    token = $("token-input").value.trim();
-    if (!token) return;
+    const username = $("username-input").value.trim();
+    const password = $("password-input").value;
+    if (!username || !password) return;
     btn.disabled = true;
     err.classList.add("hidden");
     try {
-      await api("/api/admin/stats");
+      const path = registering ? "/api/auth/register" : "/api/auth/login";
+      const payload = { username, password };
+      if (registering) payload.display_name = $("display-name-input").value.trim() || undefined;
+      const auth = await api(path, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      token = auth.token;
+      principal = auth;
       sessionStorage.setItem(TOKEN_KEY, token);
+      sessionStorage.setItem(AUTH_KEY, JSON.stringify(principal));
       enterApp();
     } catch (ex) {
       err.textContent = ex.message;
@@ -89,6 +110,12 @@
     } finally {
       btn.disabled = false;
     }
+  });
+  $("register-toggle").addEventListener("click", () => {
+    registering = !registering;
+    $("display-name-input").classList.toggle("hidden", !registering);
+    $("login-btn").textContent = registering ? "创建并登录" : "登录";
+    $("register-toggle").textContent = registering ? "返回登录" : "注册账户";
   });
   $("logout").addEventListener("click", logout);
 
@@ -123,6 +150,21 @@
   /* ---------- 仪表盘 ---------- */
   async function loadDashboard() {
     try {
+      if (principal?.role === "user") {
+        const summary = await api("/api/me/summary");
+        animateCount($("stat-users"), 1);
+        animateCount($("stat-messages"), summary.conversations);
+        animateCount($("stat-failed"), summary.memories);
+        animateCount($("stat-tokens"), summary.tokens_total);
+        $("trend").innerHTML = `
+          <div class="detail-item"><b>${summary.cards}</b><span>角色卡</span></div>
+          <div class="detail-item"><b>${summary.presets}</b><span>预设</span></div>
+          <div class="detail-item"><b>${summary.providers}</b><span>BYOK 供应商</span></div>
+          <div class="detail-item"><b>${summary.media_assets}</b><span>媒体记录</span></div>`;
+        $("last-updated").innerHTML =
+          '<span class="pulse"></span>用户自足模式 · ' + esc(summary.display_name || principal.username);
+        return;
+      }
       const [stats, trend] = await Promise.all([
         api("/api/admin/stats"),
         api("/api/admin/usage/trend?days=7"),
@@ -182,7 +224,7 @@
               <span class="badge">${esc(modeLabel)}</span>
               <button class="btn btn-sm" data-mode="${u.id}" data-mode-val="${toggleTo}" title="切换用户模式">${u.mode ? "切回" : "设为统一管理"}</button>
             </td>
-            <td><button class="btn btn-sm" data-detail="${u.id}" data-name="${esc(u.display_name || u.id)}">详情</button></td>
+            <td><button class="btn btn-sm" data-detail="${u.id}" data-name="${esc(u.display_name || u.id)}" data-username="${esc(u.account_username || "")}">详情</button></td>
             <td>${u.blocked ? '<span class="badge badge-dead">已封禁</span>' : '<span class="badge badge-ok">正常</span>'}</td>
             <td class="mono small">${esc((u.created_at || "").replace("T", " ").slice(0, 19))}</td>
             <td><button class="btn btn-sm ${u.blocked ? "" : "btn-danger"}" data-block="${u.id}" data-state="${u.blocked ? "0" : "1"}">${u.blocked ? "解封" : "封禁"}</button></td>
@@ -212,7 +254,8 @@
           } catch (ex) { toast(ex.message, true); }
         }));
       document.querySelectorAll("[data-detail]").forEach((b) =>
-        b.addEventListener("click", () => openUserDetail(b.dataset.detail, b.dataset.name)));
+        b.addEventListener("click", () => openUserDetail(
+          b.dataset.detail, b.dataset.name, b.dataset.username)));
     } catch (ex) {
       toast(ex.message, true);
     }
@@ -220,7 +263,7 @@
   $("user-search").addEventListener("input", () => loadUsers());
 
   /* ---------- 用户详情（管理端不可读内容） ---------- */
-  async function openUserDetail(userId, name) {
+  async function openUserDetail(userId, name, accountUsername) {
     try {
       const [cards, presets, providers, policies, detail] = await Promise.all([
         api(`/api/admin/users/${userId}/cards`),
@@ -230,6 +273,9 @@
         api(`/api/admin/users/${userId}/detail`),
       ]);
       $("user-modal-title").textContent = `用户详情 · ${name}`;
+      $("user-modal").dataset.userId = userId;
+      $("account-username").value = accountUsername || "";
+      $("account-password").value = "";
       $("user-detail-grid").innerHTML = [
         ["会话数", detail.conversations],
         ["记忆条数", detail.memories],
@@ -281,45 +327,100 @@
       toast(ex.message, true);
     }
   }
+  $("account-save").addEventListener("click", async () => {
+    const userId = $("user-modal").dataset.userId;
+    const username = $("account-username").value.trim();
+    const password = $("account-password").value;
+    if (!userId || !username || !password) {
+      toast("请填写登录账号和新密码", true);
+      return;
+    }
+    try {
+      await api(`/api/admin/users/${userId}/account`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username, password }),
+      });
+      $("account-password").value = "";
+      toast("登录账号已分配或重置");
+      loadUsers();
+    } catch (ex) { toast(ex.message, true); }
+  });
   $("user-modal-close").addEventListener("click", () => $("user-modal").classList.add("hidden"));
   $("user-modal").addEventListener("click", (e) => {
     if (e.target === $("user-modal")) $("user-modal").classList.add("hidden");
   });
 
   /* ---------- 渠道实例 ---------- */
+  const instanceBase = () => principal?.role === "admin"
+    ? "/api/admin/channel-instances" : "/api/me/channel-instances";
+
+  async function openQrcode(instanceId) {
+    $("qrcode-modal").classList.remove("hidden");
+    $("qrcode-loading").textContent = "正在生成安全二维码…";
+    $("qrcode-loading").classList.remove("hidden");
+    $("qrcode-image").classList.add("hidden");
+    try {
+      const res = await fetch(`${instanceBase()}/${instanceId}/qrcode`, {
+        headers: { "Authorization": `Bearer ${token}` },
+        cache: "no-store",
+      });
+      if (!res.ok) throw new Error("二维码已过期，请重新生成");
+      const url = URL.createObjectURL(await res.blob());
+      $("qrcode-image").src = url;
+      $("qrcode-image").classList.remove("hidden");
+      $("qrcode-loading").classList.add("hidden");
+    } catch (ex) {
+      $("qrcode-loading").textContent = ex.message;
+    }
+  }
+
   async function loadInstances() {
     try {
-      const rows = await api("/api/admin/channel-instances");
+      const rows = await api(instanceBase());
       $("inst-tbody").innerHTML = rows.length
         ? rows.map((i) => `
           <tr>
             <td>${esc(i.instance_name)}</td>
             <td class="mono">${esc(i.channel)}</td>
-            <td><span class="badge badge-${i.status === "online" ? "ok" : i.status === "error" ? "dead" : "ignored"}">${esc(i.status)}</span></td>
+            <td>
+              <span class="badge badge-${i.status === "online" ? "ok" : i.status === "error" ? "dead" : "ignored"}">${esc(i.status)}</span>
+              ${i.login?.qrcode_available ? `<button class="btn btn-sm" data-qrcode="${i.id}">扫码登录</button>` : ""}
+            </td>
             <td class="mono small">${esc((i.owner_user_id || "—").slice(0, 12))}</td>
             <td class="mono small">${esc((i.created_at || "").replace("T", " ").slice(0, 19))}</td>
             <td>
-              <button class="btn btn-sm" data-start="${i.id}" ${i.status === "online" ? "disabled" : ""}>启动</button>
-              <button class="btn btn-sm" data-stop="${i.id}" ${i.status !== "online" ? "disabled" : ""}>停止</button>
+              <button class="btn btn-sm" data-start="${i.id}" ${["online", "logging_in"].includes(i.status) ? "disabled" : ""}>启动</button>
+              <button class="btn btn-sm" data-stop="${i.id}" ${!["online", "logging_in"].includes(i.status) ? "disabled" : ""}>停止</button>
             </td>
           </tr>`).join("")
         : '<tr><td colspan="6" class="muted">暂无渠道实例</td></tr>';
       document.querySelectorAll("[data-start]").forEach((b) =>
         b.addEventListener("click", async () => {
           try {
-            await api(`/api/admin/channel-instances/${b.dataset.start}/start`, { method: "POST" });
-            toast("启动指令已下发");
+            const instance = await api(`${instanceBase()}/${b.dataset.start}/start`, { method: "POST" });
+            if (instance.login?.qrcode_available) {
+              await openQrcode(b.dataset.start);
+              toast("二维码已生成，请用隔离微信小号扫码");
+            } else {
+              toast("启动指令已下发");
+            }
             loadInstances();
           } catch (ex) { toast(ex.message, true); }
         }));
       document.querySelectorAll("[data-stop]").forEach((b) =>
         b.addEventListener("click", async () => {
           try {
-            await api(`/api/admin/channel-instances/${b.dataset.stop}/stop`, { method: "POST" });
+            await api(`${instanceBase()}/${b.dataset.stop}/stop`, { method: "POST" });
             toast("已停止");
             loadInstances();
           } catch (ex) { toast(ex.message, true); }
         }));
+      document.querySelectorAll("[data-qrcode]").forEach((b) =>
+        b.addEventListener("click", () => openQrcode(b.dataset.qrcode)));
+      if (rows.some((i) => i.status === "logging_in")) {
+        setTimeout(loadInstances, 3000);
+      }
     } catch (ex) {
       toast(ex.message, true);
     }
@@ -329,9 +430,11 @@
     const owner = $("inst-owner").value.trim();
     if (!name) { toast("实例名称必填", true); return; }
     try {
-      const body = { channel: $("inst-channel").value, instance_name: name };
-      if (owner) body.owner_user_id = owner;
-      await api("/api/admin/channel-instances", {
+      const body = principal?.role === "admin"
+        ? { channel: $("inst-channel").value, instance_name: name }
+        : { instance_name: name };
+      if (principal?.role === "admin" && owner) body.owner_user_id = owner;
+      await api(instanceBase(), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
@@ -341,6 +444,10 @@
       toast("实例已创建");
       loadInstances();
     } catch (ex) { toast(ex.message, true); }
+  });
+  $("qrcode-close").addEventListener("click", () => $("qrcode-modal").classList.add("hidden"));
+  $("qrcode-modal").addEventListener("click", (e) => {
+    if (e.target === $("qrcode-modal")) $("qrcode-modal").classList.add("hidden");
   });
 
   /* ---------- 媒体审计 ---------- */
@@ -416,9 +523,17 @@
   }
 
   /* ---------- 启动 ---------- */
+  fetch("/api/auth/config")
+    .then((res) => res.json())
+    .then((cfg) => $("register-toggle").classList.toggle("hidden", !cfg.registration_enabled))
+    .catch(() => {});
   if (token) {
-    api("/api/admin/stats")
-      .then(enterApp)
+    api("/api/auth/me")
+      .then((auth) => {
+        principal = auth;
+        sessionStorage.setItem(AUTH_KEY, JSON.stringify(auth));
+        enterApp();
+      })
       .catch(() => logout());
   }
 })();

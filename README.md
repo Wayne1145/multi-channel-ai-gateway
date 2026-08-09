@@ -23,7 +23,7 @@
 - 每日 Token 配额
 - 管理 API 和轻量管理首页
 - Docker Compose / 1Panel 友好部署
-- 可选 `wechat_clawbot` 桥接：以独立实例接入个人微信 Agent；登录凭据由桥接侧保管，网关仅处理规范化消息
+- 可选 `wechat_clawbot` Bridge：仓库内置可独立部署的 iLink 文本桥接，多实例会话加密隔离；登录凭据由 Bridge 保管，网关仅处理规范化消息
 
 > 当前版本是 **0.3.0-dev 可靠任务与多渠道基础**，并非最初路线图的全部功能。已实现、已验证与尚未实现的明确边界见 [项目状态与路线图](docs/project-status.md)。接入真实模型或个人微信桥接前仍需隔离环境联调；大规模生产使用前还需发送失败事件、压力与故障测试。
 
@@ -57,6 +57,17 @@ cp .env.example .env
 docker compose up -d --build
 curl http://127.0.0.1:18082/health
 ```
+
+启用可选 ClawBot Bridge：
+
+```bash
+mkdir -p data/clawbot-bridge
+sudo chown 10001:10001 data/clawbot-bridge
+sudo chmod 700 data/clawbot-bridge
+docker compose --profile clawbot up -d --build
+```
+
+Bridge 当前完成文本收发；图片、语音、视频与文件仍未实现。详见 [Bridge 文档](bridge/README.md)。
 
 企业微信后台回调 URL：
 
@@ -105,7 +116,7 @@ uv run ruff check src tests
 
 仓库已启用 `.github/workflows/ci.yml`，每次 push 与 pull request 会运行 Ruff、pytest 覆盖率报告和 Docker 镜像构建。
 
-详见 [项目状态与路线图](docs/project-status.md)、[第三方依赖与参考说明](THIRD_PARTY.md)、[部署文档](docs/deployment.md)、[架构说明](docs/architecture.md) 和 [安全策略](SECURITY.md)。
+详见 [项目状态与路线图](docs/project-status.md)、[Bridge 文档](bridge/README.md)、[第三方依赖与参考说明](THIRD_PARTY.md)、[部署文档](docs/deployment.md)、[架构说明](docs/architecture.md) 和 [安全策略](SECURITY.md)。
 
 ## 微信客服限制
 

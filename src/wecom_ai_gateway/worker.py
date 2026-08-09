@@ -1,6 +1,7 @@
 import asyncio
 import logging
 
+from .clawbot import register_clawbot_adapter
 from .config import settings
 from .media import cleanup_expired_media
 from .queueing import WAKE_QUEUE, redis_client
@@ -17,6 +18,11 @@ from .tasks import (
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 log = logging.getLogger(__name__)
+
+
+def register_worker_adapters() -> None:
+    """注册 Worker 处理出站消息所需的渠道适配器。"""
+    register_clawbot_adapter()
 
 
 async def execute_task(task) -> None:
@@ -75,6 +81,7 @@ async def drain_available_tasks() -> int:
 
 
 async def main():
+    register_worker_adapters()
     r = redis_client()
     log.info("任务 Worker 已启动（持久化 Outbox 模式）")
     last_reconcile = 0.0

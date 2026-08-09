@@ -257,6 +257,109 @@ async def test_channel_instance_start_failure_is_recorded_without_leaking_detail
     db.close()
 
 
+def test_channel_instance_start_preserves_pending_login_and_safe_qrcode(monkeypatch):
+    from wecom_ai_gateway.channels import registry
+    from wecom_ai_gateway.db import SessionLocal
+    from wecom_ai_gateway.models import ChannelInstance
+
+    headers = {"X-Admin-Token": "test-admin-token"}
+    created = client.post(
+        "/api/admin/channel-instances",
+        headers=headers,
+        json={"channel": "wechat_clawbot", "instance_name": "等待扫码桥接"},
+    )
+    instance_id = created.json()["id"]
+    adapter = registry.get("wechat_clawbot")
+
+    async def pending_start(_instance_id):
+        return {
+            "status": "pending_login",
+            "qrcode_url": "https://qr.example/login-1",
+            "bot_token": "must-never-leak",
+        }
+
+    monkeypatch.setattr(adapter, "start_instance", pending_start)
+    response = client.post(f"/api/admin/channel-instances/{instance_id}/start", headers=headers)
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "logging_in"
+    assert response.json()["login"] == {
+        "status": "pending_login",
+        "qrcode_available": True,
+    }
+    assert "must-never-leak" not in response.text
+    db = SessionLocal()
+    row = db.get(ChannelInstance, instance_id)
+    assert row.status == "logging_in"
+    assert row.login_state == {
+        "status": "pending_login",
+        "qrcode_url": "https://qr.example/login-1",
+    }
+    db.close()
+
+
+def test_internal_channel_status_marks_instance_online_without_exposing_secrets(monkeypatch):
+    from wecom_ai_gateway.config import settings
+    from wecom_ai_gateway.db import SessionLocal
+    from wecom_ai_gateway.models import ChannelInstance
+
+    monkeypatch.setattr(settings, "clawbot_bridge_token", "bridge-test-token")
+    headers = {"X-Admin-Token": "test-admin-token"}
+    created = client.post(
+        "/api/admin/channel-instances",
+        headers=headers,
+        json={"channel": "wechat_clawbot", "instance_name": "状态回调桥接"},
+    )
+    instance_id = created.json()["id"]
+
+    response = client.post(
+        f"/api/internal/channel-instances/{instance_id}/status",
+        headers={"Authorization": "Bearer bridge-test-token"},
+        json={
+            "status": "online",
+            "account_id": "bot@im.bot",
+            "bot_token": "must-never-leak",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "online"
+    assert response.json()["login"] == {
+        "status": "online",
+        "account_id": "bot@im.bot",
+    }
+    assert "must-never-leak" not in response.text
+    db = SessionLocal()
+    row = db.get(ChannelInstance, instance_id)
+    assert row is not None
+    assert row.status == "online"
+    assert row.login_state == {"status": "online", "account_id": "bot@im.bot"}
+    db.close()
+
+
+def test_internal_channel_status_rejects_unsafe_qrcode_url(monkeypatch):
+    from wecom_ai_gateway.config import settings
+
+    monkeypatch.setattr(settings, "clawbot_bridge_token", "bridge-test-token")
+    headers = {"X-Admin-Token": "test-admin-token"}
+    created = client.post(
+        "/api/admin/channel-instances",
+        headers=headers,
+        json={"channel": "wechat_clawbot", "instance_name": "危险二维码测试"},
+    )
+    instance_id = created.json()["id"]
+
+    response = client.post(
+        f"/api/internal/channel-instances/{instance_id}/status",
+        headers={"Authorization": "Bearer bridge-test-token"},
+        json={"status": "pending_login", "qrcode_url": "javascript:alert(1)"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["login"] == {"status": "pending_login"}
+    assert "javascript:" not in response.text
+
+
 def test_internal_channel_message_reuses_generic_ingestion_and_is_idempotent(monkeypatch):
     from wecom_ai_gateway.config import settings
     from wecom_ai_gateway.db import SessionLocal

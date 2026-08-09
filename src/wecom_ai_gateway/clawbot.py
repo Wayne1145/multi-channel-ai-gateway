@@ -29,8 +29,9 @@ class ClawBotAdapter(ChannelAdapter):
             raise RuntimeError("未配置 ClawBot 桥接服务")
         return f"{self._base_url}{path}"
 
-    async def start_instance(self, instance_id: str) -> None:
-        await self._post(f"/instances/{instance_id}/start", {})
+    async def start_instance(self, instance_id: str) -> dict:
+        """启动实例，并返回桥接侧的公开登录状态（如二维码地址）。"""
+        return await self._post(f"/instances/{instance_id}/start", {})
 
     async def stop_instance(self, instance_id: str) -> None:
         await self._post(f"/instances/{instance_id}/stop", {})

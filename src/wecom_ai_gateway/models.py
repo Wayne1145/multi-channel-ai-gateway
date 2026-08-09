@@ -54,6 +54,38 @@ class User(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class Account(Base):
+    """后台登录账号；聊天用户与登录凭据分离。"""
+
+    __tablename__ = "accounts"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), unique=True, index=True
+    )
+    username: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    password_hash: Mapped[str] = mapped_column(Text)
+    role: Mapped[str] = mapped_column(String(20), default="user")
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class AuthSession(Base):
+    """不透明后台会话；数据库只保存令牌摘要。"""
+
+    __tablename__ = "auth_sessions"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    account_id: Mapped[str | None] = mapped_column(
+        ForeignKey("accounts.id", ondelete="CASCADE"), index=True
+    )
+    user_id: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    role: Mapped[str] = mapped_column(String(20))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class ChannelIdentity(Base):
     __tablename__ = "channel_identities"
     __table_args__ = (UniqueConstraint("channel", "account_id", "external_id_hash"),)
