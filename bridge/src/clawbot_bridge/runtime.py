@@ -60,6 +60,7 @@ class InstanceState:
     context_tokens: dict[str, str] = field(default_factory=dict)
     task: asyncio.Task | None = None
     error: str | None = None
+    desired_running: bool = True
 
 
 class BridgeRuntime:
@@ -84,6 +85,9 @@ class BridgeRuntime:
             return []
         restored: list[str] = []
         for instance_id in self._state_store.instance_ids():
+            stored = self._state_store.load(instance_id)
+            if not stored or not stored.desired_running:
+                continue
             result = await self.start(instance_id)
             if result.get("status") == "online":
                 restored.append(instance_id)
@@ -102,8 +106,10 @@ class BridgeRuntime:
                     credentials=stored.credentials,
                     account_id=stored.account_id,
                     context_tokens=dict(stored.context_tokens),
+                    desired_running=True,
                 )
                 self._instances[instance_id] = state
+                self._save_state(instance_id, state)
                 state.task = asyncio.create_task(self._run_online_instance(instance_id, state))
                 return {"status": "online", "account_id": stored.account_id}
             pending = await self._login_provider.start_login()
@@ -227,6 +233,7 @@ class BridgeRuntime:
                 credentials=state.credentials,
                 account_id=state.account_id,
                 context_tokens=dict(state.context_tokens),
+                desired_running=state.desired_running,
             ),
         )
 
@@ -234,7 +241,21 @@ class BridgeRuntime:
         async with self._lock:
             state = self._instances.get(instance_id)
             if not state:
+                if self._state_store:
+                    stored = self._state_store.load(instance_id)
+                    if stored:
+                        self._state_store.save(
+                            instance_id,
+                            StoredInstanceState(
+                                credentials=stored.credentials,
+                                account_id=stored.account_id,
+                                context_tokens=dict(stored.context_tokens),
+                                desired_running=False,
+                            ),
+                        )
                 return
+            state.desired_running = False
+            self._save_state(instance_id, state)
             state.stop_event.set()
             if state.task and not state.task.done():
                 state.task.cancel()

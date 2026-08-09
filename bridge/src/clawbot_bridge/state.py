@@ -19,6 +19,7 @@ class StoredInstanceState:
     credentials: ILinkCredentials
     account_id: str
     context_tokens: dict[str, str]
+    desired_running: bool = True
 
 
 class EncryptedStateStore:
@@ -38,6 +39,7 @@ class EncryptedStateStore:
                 "base_url": state.credentials.base_url,
                 "account_id": state.account_id,
                 "context_tokens": state.context_tokens,
+                "desired_running": state.desired_running,
             },
             ensure_ascii=False,
         ).encode()
@@ -62,6 +64,8 @@ class EncryptedStateStore:
             ),
             account_id=str(payload["account_id"]),
             context_tokens={str(key): str(value) for key, value in payload.get("context_tokens", {}).items()},
+            # 兼容升级前的会话文件：旧文件来自在线实例，默认继续恢复。
+            desired_running=bool(payload.get("desired_running", True)),
         )
 
     def instance_ids(self) -> list[str]:

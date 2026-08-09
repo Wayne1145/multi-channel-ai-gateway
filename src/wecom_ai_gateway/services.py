@@ -116,7 +116,7 @@ async def sync_wecom_messages(callback_token: str, open_kfid: str) -> None:
 def ingest_channel_message(db, incoming: ChannelMessage) -> Message | None:
     """将任意文本渠道消息按统一身份、会话和 Outbox 语义入库。
 
-    非文本消息保留为 ignored；重复 external_message_id 不会生成第二条任务。
+    非文本消息保留为 ignored；同一渠道实例内重复 external_message_id 不会生成第二条任务。
     渠道适配器只需构造 ChannelMessage，不能绕过这条隔离路径。
     媒体条目只落 MediaAsset 元数据，不进 metadata_json（避免 URL/凭据滞留）。
     """
@@ -125,6 +125,7 @@ def ingest_channel_message(db, incoming: ChannelMessage) -> Message | None:
     exists = db.scalar(
         select(Message.id).where(
             Message.channel == incoming.channel,
+            Message.channel_instance_id == incoming.instance_id,
             Message.external_message_id == incoming.external_message_id,
         )
     )
@@ -138,6 +139,7 @@ def ingest_channel_message(db, incoming: ChannelMessage) -> Message | None:
         conversation_id=conversation.id,
         user_id=user.id,
         channel=incoming.channel,
+        channel_instance_id=incoming.instance_id,
         external_message_id=incoming.external_message_id,
         direction=MessageDirection.inbound,
         message_type=incoming.message_type,
@@ -166,7 +168,11 @@ def ingest(db, item: dict) -> None:
     if not msgid:
         return
     exists = db.scalar(
-        select(Message.id).where(Message.channel == "wecom_kf", Message.external_message_id == msgid)
+        select(Message.id).where(
+            Message.channel == "wecom_kf",
+            Message.channel_instance_id == str(item.get("open_kfid", "")),
+            Message.external_message_id == msgid,
+        )
     )
     if exists:
         return
@@ -184,6 +190,7 @@ def ingest(db, item: dict) -> None:
         conversation_id=conversation.id if conversation else None,
         user_id=user.id if user else None,
         channel="wecom_kf",
+        channel_instance_id=open_kfid,
         external_message_id=msgid,
         direction=MessageDirection.inbound,
         message_type=msgtype,
@@ -316,6 +323,7 @@ async def process_message(message_id: str) -> None:
                         conversation_id=row.conversation_id,
                         user_id=row.user_id,
                         channel=row.channel,
+                        channel_instance_id=account_id,
                         external_message_id=media_msg_id or f"local:{row.id}",
                         direction=MessageDirection.outbound,
                         message_type=str(media.get("media_type") or "media"),
@@ -352,6 +360,7 @@ async def process_message(message_id: str) -> None:
                         conversation_id=row.conversation_id,
                         user_id=row.user_id,
                         channel=row.channel,
+                        channel_instance_id=account_id,
                         external_message_id=media_msg_id or f"local:{row.id}",
                         direction=MessageDirection.outbound,
                         message_type=str(media.get("media_type") or "media"),
@@ -365,6 +374,7 @@ async def process_message(message_id: str) -> None:
                 conversation_id=row.conversation_id,
                 user_id=row.user_id,
                 channel=row.channel,
+                channel_instance_id=account_id,
                 external_message_id=sent_id or f"local:{row.id}",
                 direction=MessageDirection.outbound,
                 message_type="text",

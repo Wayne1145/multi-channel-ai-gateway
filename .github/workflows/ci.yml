@@ -26,7 +26,7 @@ jobs:
       - name: 安装并测试可选 ClawBot Bridge
         run: |
           cd bridge
-          uv sync --extra dev
+          uv sync --extra dev --locked
           uv run ruff check src tests
           uv run pytest
       - name: 构建容器镜像

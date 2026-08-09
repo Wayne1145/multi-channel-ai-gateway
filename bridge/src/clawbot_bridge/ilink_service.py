@@ -44,12 +44,12 @@ class ILinkService:
         client = self._client_factory(credentials)
         cursor = self._load_cursor(instance_id)
         while not stop_event.is_set():
-            cursor, messages = await client.get_updates(cursor)
-            self._save_cursor(instance_id, cursor)
+            next_cursor, messages = await client.get_updates(cursor)
             for message in messages:
                 await on_message(message)
-                if stop_event.is_set():
-                    break
+            # 只有整批消息都被网关接受后，才提交 iLink 游标。
+            self._save_cursor(instance_id, next_cursor)
+            cursor = next_cursor
 
     async def send_text(
         self,

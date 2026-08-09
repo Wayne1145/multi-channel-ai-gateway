@@ -60,6 +60,35 @@ def test_generic_channel_ingest_is_idempotent_and_enqueues_message_task(db):
     assert first.status == MessageStatus.queued
     assert first.metadata_json["instance_id"] == "instance-1"
     assert db.query(ChannelIdentity).filter_by(channel="wechat_clawbot", account_id="instance-1").count() == 1
+
+
+def test_ingest_channel_message_scopes_idempotency_to_instance(db):
+    first = ingest_channel_message(
+        db,
+        ChannelMessage(
+            channel="wechat_clawbot",
+            instance_id="instance-1",
+            sender_id="wechat-user-1",
+            external_message_id="account-local-message-id",
+            content="实例一",
+        ),
+    )
+    second = ingest_channel_message(
+        db,
+        ChannelMessage(
+            channel="wechat_clawbot",
+            instance_id="instance-2",
+            sender_id="wechat-user-2",
+            external_message_id="account-local-message-id",
+            content="实例二",
+        ),
+    )
+    db.commit()
+
+    assert first is not None
+    assert second is not None
+    assert first.channel_instance_id == "instance-1"
+    assert second.channel_instance_id == "instance-2"
     assert db.query(OutboxTask).filter_by(dedupe_key=f"message:{first.id}").count() == 1
     assert first.user_id != ""
 

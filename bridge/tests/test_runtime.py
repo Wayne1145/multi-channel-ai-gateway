@@ -284,3 +284,86 @@ async def test_runtime_restores_all_encrypted_sessions_at_process_start(tmp_path
     assert gateway.statuses == [("instance-restart", "online", "stored-bot@im.bot")]
     assert not login.completed.is_set()
     await runtime.stop("instance-restart")
+
+
+@pytest.mark.anyio
+async def test_runtime_does_not_restore_explicitly_stopped_instance(tmp_path: Path) -> None:
+    store = EncryptedStateStore(tmp_path, "bridge-secret-at-least-16")
+    store.save(
+        "instance-stopped",
+        StoredInstanceState(
+            credentials=ILinkCredentials("stored-token", "https://ilinkai.weixin.qq.com"),
+            account_id="stored-bot@im.bot",
+            context_tokens={},
+        ),
+    )
+    running = BridgeRuntime(
+        login_provider=FakeLoginProvider(),
+        gateway=FakeGateway(),
+        ilink=FakeMonitor(),
+        state_store=store,
+    )
+    await running.start("instance-stopped")
+    await running.stop("instance-stopped")
+
+    restarted = BridgeRuntime(
+        login_provider=FakeLoginProvider(),
+        gateway=FakeGateway(),
+        ilink=FakeMonitor(),
+        state_store=store,
+    )
+
+    assert await restarted.restore_all() == []
+    assert restarted.status("instance-stopped") == {"status": "offline"}
+
+
+@pytest.mark.anyio
+async def test_stop_marks_unloaded_persisted_instance_as_stopped(tmp_path: Path) -> None:
+    store = EncryptedStateStore(tmp_path, "bridge-secret-at-least-16")
+    store.save(
+        "instance-not-loaded",
+        StoredInstanceState(
+            credentials=ILinkCredentials("stored-token", "https://ilinkai.weixin.qq.com"),
+            account_id="stored-bot@im.bot",
+            context_tokens={},
+        ),
+    )
+    runtime = BridgeRuntime(
+        login_provider=FakeLoginProvider(),
+        gateway=FakeGateway(),
+        ilink=FakeMonitor(),
+        state_store=store,
+    )
+
+    await runtime.stop("instance-not-loaded")
+
+    assert store.load("instance-not-loaded").desired_running is False
+    assert await runtime.restore_all() == []
+
+
+@pytest.mark.anyio
+async def test_explicit_start_resumes_previously_stopped_encrypted_session(tmp_path: Path) -> None:
+    store = EncryptedStateStore(tmp_path, "bridge-secret-at-least-16")
+    store.save(
+        "instance-paused",
+        StoredInstanceState(
+            credentials=ILinkCredentials("stored-token", "https://ilinkai.weixin.qq.com"),
+            account_id="stored-bot@im.bot",
+            context_tokens={},
+            desired_running=False,
+        ),
+    )
+    monitor = FakeMonitor()
+    runtime = BridgeRuntime(
+        login_provider=FakeLoginProvider(),
+        gateway=FakeGateway(),
+        ilink=monitor,
+        state_store=store,
+    )
+
+    result = await runtime.start("instance-paused")
+    await asyncio.wait_for(monitor.started.wait(), timeout=1)
+
+    assert result == {"status": "online", "account_id": "stored-bot@im.bot"}
+    assert store.load("instance-paused").desired_running is True
+    await runtime.stop("instance-paused")
