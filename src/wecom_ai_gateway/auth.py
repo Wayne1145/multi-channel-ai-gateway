@@ -1,6 +1,7 @@
 """管理后台的账号、密码与不透明会话认证。"""
 
 import hashlib
+import logging
 import secrets
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -9,8 +10,13 @@ from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from .config import settings
+from .db import SessionLocal
 from .models import Account, AuthSession, User
+from .queueing import redis_client
+from .runtime_settings import get_runtime_value
 from .security import verify_admin_token, verify_password
+
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -41,13 +47,14 @@ def create_session(
     account_id: str | None,
 ) -> str:
     token = secrets.token_urlsafe(32)
+    days = int(get_runtime_value(db, "auth_session_days"))
     db.add(
         AuthSession(
             account_id=account_id,
             user_id=user_id,
             token_hash=_token_hash(token),
             role=role,
-            expires_at=datetime.now(UTC) + timedelta(days=settings.auth_session_days),
+            expires_at=datetime.now(UTC) + timedelta(days=days),
         )
     )
     db.commit()
@@ -74,6 +81,39 @@ def login(db: Session, username: str, password: str) -> tuple[str, Principal] | 
         account_id=account.id,
     )
     return token, Principal(role=account.role, user_id=account.user_id, username=account.username)
+
+
+def _login_lock_key(username: str) -> str:
+    return f"login:fail:{username}"
+
+
+def is_login_locked(username: str) -> bool:
+    """Redis 不可用时按未锁定处理（fail-open），避免 Redis 故障锁死全部登录。"""
+    try:
+        redis = redis_client()
+        attempts = int(redis.get(_login_lock_key(username)) or 0)
+        max_attempts = int(get_runtime_value(SessionLocal(), "login_max_attempts"))
+        return attempts >= max_attempts
+    except Exception:  # noqa: BLE001 - Redis 故障或 DB 不可用时不阻塞登录
+        return False
+
+
+def record_login_failure(username: str) -> None:
+    try:
+        redis = redis_client()
+        attempts = redis.incr(_login_lock_key(username))
+        lock_minutes = int(get_runtime_value(SessionLocal(), "login_lock_minutes"))
+        if attempts == 1:
+            redis.expire(_login_lock_key(username), lock_minutes * 60)
+    except Exception:  # noqa: BLE001 - 登录失败计数丢失不影响正确性
+        log.warning("记录登录失败计数失败 username=%s", username)
+
+
+def clear_login_failures(username: str) -> None:
+    try:
+        redis_client().delete(_login_lock_key(username))
+    except Exception:  # noqa: BLE001 - 清理失败只影响下一次计数起点
+        log.debug("清除登录失败计数失败 username=%s", username)
 
 
 def principal_from_bearer(db: Session, authorization: str | None) -> Principal | None:

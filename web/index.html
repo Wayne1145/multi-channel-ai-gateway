@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Tsukuyomi AI Gateway · 管理后台</title>
-<link rel="stylesheet" href="/static/app.css?v=3">
+<link rel="stylesheet" href="/static/app.css?v=4">
 </head>
 <body>
 
@@ -19,6 +19,7 @@
     <button type="submit" class="btn btn-block btn-primary" id="login-btn">登录</button>
     <button type="button" class="btn btn-block btn-ghost hidden" id="register-toggle">注册账户</button>
     <p class="login-hint">会话令牌仅保存在本浏览器会话中</p>
+    <p id="login-announcement" class="login-hint hidden"></p>
     <p id="login-error" class="login-error hidden"></p>
   </form>
 </div>
@@ -52,6 +53,10 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4M5 5l2.5 2.5M16.5 16.5 19 19M19 5l-2.5 2.5M7.5 16.5 5 19"/></svg>
         死信任务
       </button>
+      <button class="nav-item admin-only" data-view="settings">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1.03 1.56V21a2 2 0 1 1-4 0v-.09a1.7 1.7 0 0 0-1.03-1.56 1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.7 1.7 0 0 0 .34-1.87 1.7 1.7 0 0 0-1.56-1.03H3a2 2 0 1 1 0-4h.09a1.7 1.7 0 0 0 1.56-1.03 1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.87.34h.09a1.7 1.7 0 0 0 1.03-1.56V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1.03 1.56 1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.87v.09a1.7 1.7 0 0 0 1.56 1.03H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.56 1.03z"/></svg>
+        平台设置
+      </button>
     </nav>
     <button id="logout" class="btn btn-ghost sidebar-foot">退出登录</button>
   </aside>
@@ -69,6 +74,7 @@
 
     <!-- 仪表盘 -->
     <section id="view-dashboard" class="view">
+      <div id="quota-box" class="card"></div>
       <div class="stat-grid">
         <article class="stat-card">
           <span class="stat-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="9" cy="8" r="3.2"/><path d="M3.5 20c.6-3.4 2.8-5 5.5-5s4.9 1.6 5.5 5"/></svg></span>
@@ -192,6 +198,16 @@
         </div>
       </div>
     </section>
+    <section id="view-settings" class="view hidden">
+      <div class="card">
+        <div class="card-head">
+          <h2>平台设置</h2>
+          <button id="settings-save" class="btn btn-primary">保存全部设置</button>
+        </div>
+        <div id="settings-groups" class="settings-groups"></div>
+        <p class="muted small">数值类设置保存后立即生效；带“仅展示”标记的项通过服务器环境变量管理。</p>
+      </div>
+    </section>
   </main>
 </div>
 
@@ -267,6 +283,6 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=5"></script>
+<script src="/static/app.js?v=6"></script>
 </body>
 </html>

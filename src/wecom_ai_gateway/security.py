@@ -33,10 +33,10 @@ def verify_admin_token(value: str | None) -> bool:
     return bool(value) and hmac.compare_digest(value, settings.admin_token)
 
 
-def hash_password(password: str) -> str:
+def hash_password(password: str, min_length: int = 10) -> str:
     """使用 scrypt 与独立随机盐保存密码；格式包含参数，便于以后升级。"""
-    if len(password) < 10:
-        raise ValueError("password must contain at least 10 characters")
+    if len(password) < min_length:
+        raise ValueError(f"password must contain at least {min_length} characters")
     salt = secrets.token_bytes(16)
     derived = hashlib.scrypt(password.encode(), salt=salt, n=2**14, r=8, p=1, dklen=32)
     return "scrypt$16384$8$1$" + base64.urlsafe_b64encode(salt).decode() + "$" + base64.urlsafe_b64encode(derived).decode()

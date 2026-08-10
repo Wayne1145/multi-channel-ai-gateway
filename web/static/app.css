@@ -423,3 +423,30 @@ select.field { cursor: pointer; }
   }
   .pulse::after { display: none; }
 }
+
+/* ---------- 平台设置 ---------- */
+.settings-groups { display: grid; gap: 22px; margin-top: 8px; }
+.settings-group { border: 1px solid var(--border, rgba(128,128,128,.18)); border-radius: 12px; padding: 16px 18px; }
+.settings-group h3 { margin: 0 0 12px; font-size: 14px; color: var(--muted, #888); letter-spacing: .04em; }
+.settings-item { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 10px 0; border-top: 1px solid rgba(128,128,128,.1); }
+.settings-item:first-of-type { border-top: 0; }
+.settings-info { flex: 1; min-width: 0; }
+.settings-label { font-weight: 600; font-size: 14px; }
+.settings-desc { margin-top: 2px; font-size: 12px; color: var(--muted, #888); }
+.settings-control { display: flex; align-items: center; gap: 8px; max-width: 340px; }
+.settings-input { width: 150px; }
+.settings-static { font-variant-numeric: tabular-nums; color: var(--muted, #888); }
+.switch { position: relative; display: inline-block; width: 42px; height: 24px; flex: none; }
+.switch input { opacity: 0; width: 0; height: 0; }
+.switch-slider { position: absolute; inset: 0; border-radius: 999px; background: rgba(128,128,128,.35); transition: .2s; }
+.switch-slider::before { content: ""; position: absolute; width: 18px; height: 18px; left: 3px; top: 3px; border-radius: 50%; background: #fff; transition: .2s; }
+.switch input:checked + .switch-slider { background: var(--accent, #4f8cff); }
+.switch input:checked + .switch-slider::before { transform: translateX(18px); }
+
+/* ---------- 用户配额展示 ---------- */
+#quota-box { margin-bottom: 14px; }
+.quota-head { display: flex; justify-content: space-between; align-items: baseline; font-size: 13px; }
+.quota-bar { height: 6px; border-radius: 999px; background: rgba(128,128,128,.15); margin-top: 8px; overflow: hidden; }
+.quota-fill { height: 100%; border-radius: 999px; background: var(--accent, #4f8cff); transition: width .4s; }
+.quota-fill.warn { background: var(--danger, #ff4d6d); }
+.text-danger { color: var(--danger, #ff4d6d); }

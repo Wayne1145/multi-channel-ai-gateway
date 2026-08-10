@@ -26,6 +26,7 @@ from .models import (
 from .policy import get_command_decision, normalize_command
 from .providers import provider_for
 from .redaction import redact_error
+from .runtime_settings import get_runtime_value
 from .security import decrypt_secret, encrypt_secret, external_id_hash
 from .tasks import add_message_task
 from .wecom import client
@@ -131,10 +132,19 @@ def ingest_channel_message(db, incoming: ChannelMessage) -> Message | None:
     )
     if exists:
         return None
+    content = incoming.content
+    if incoming.message_type == "text" and content:
+        content = content[: int(get_runtime_value(db, "message_max_chars"))]
     user = resolve_user(db, incoming.sender_id, incoming.instance_id, incoming.channel)
     conversation = active_conversation(db, user.id)
     media = [m for m in (incoming.media or []) if isinstance(m, dict)]
-    should_reply = incoming.message_type == "text" and bool(incoming.content) and not user.is_blocked
+    maintenance = bool(get_runtime_value(db, "maintenance_mode"))
+    should_reply = (
+        incoming.message_type == "text"
+        and bool(content)
+        and not user.is_blocked
+        and not maintenance
+    )
     row = Message(
         conversation_id=conversation.id,
         user_id=user.id,
@@ -143,7 +153,7 @@ def ingest_channel_message(db, incoming: ChannelMessage) -> Message | None:
         external_message_id=incoming.external_message_id,
         direction=MessageDirection.inbound,
         message_type=incoming.message_type,
-        content=incoming.content,
+        content=content,
         status=MessageStatus.queued if should_reply else MessageStatus.ignored,
         metadata_json={
             "instance_id": incoming.instance_id,
@@ -185,7 +195,13 @@ def ingest(db, item: dict) -> None:
     media: list[dict] = []
     if msgtype in {"image", "voice", "file"}:
         media = [{"media_type": msgtype, "media_id": item.get("media_id"), "mime": item.get("format")}]
-    should_reply = origin == 3 and msgtype == "text" and user and not user.is_blocked
+    should_reply = (
+        origin == 3
+        and msgtype == "text"
+        and user
+        and not user.is_blocked
+        and not bool(get_runtime_value(db, "maintenance_mode"))
+    )
     row = Message(
         conversation_id=conversation.id if conversation else None,
         user_id=user.id if user else None,
@@ -408,14 +424,8 @@ async def _complete_ai(db, row: Message, conversation: Conversation, user_settin
     if not api_key:
         return settings.unconfigured_model_message
 
-    start = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
-    used = db.scalar(
-        select(func.coalesce(func.sum(UsageRecord.prompt_tokens + UsageRecord.completion_tokens), 0)).where(
-            UsageRecord.user_id == row.user_id, UsageRecord.created_at >= start
-        )
-    )
-    quota = user_settings.daily_token_quota or settings.user_daily_token_quota
-    if used >= quota:
+    status = quota_status(db, row.user_id, user_settings)
+    if status["exceeded"]:
         return "今天的模型使用额度已经用完，请明天再来。"
 
     history = list(
@@ -472,7 +482,7 @@ async def _complete_ai(db, row: Message, conversation: Conversation, user_settin
         prompts,
         model,
         user_settings.temperature if user_settings.temperature is not None else 0.7,
-        user_settings.max_tokens or settings.default_max_tokens,
+        user_settings.max_tokens or int(get_runtime_value(db, "default_max_tokens")),
     )
     db.add(
         UsageRecord(
@@ -484,3 +494,29 @@ async def _complete_ai(db, row: Message, conversation: Conversation, user_settin
         )
     )
     return result.content
+
+
+def quota_status(db, user_id: str, user_settings) -> dict:
+    """返回用户当日配额状态；配额开关关闭时永不超限。"""
+    if not bool(get_runtime_value(db, "daily_quota_enabled")):
+        return {"enabled": False, "quota": 0, "used": 0, "remaining": 0, "exceeded": False}
+    start = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+    used = int(
+        db.scalar(
+            select(func.coalesce(func.sum(UsageRecord.prompt_tokens + UsageRecord.completion_tokens), 0)).where(
+                UsageRecord.user_id == user_id, UsageRecord.created_at >= start
+            )
+        )
+        or 0
+    )
+    quota = int(
+        (user_settings.daily_token_quota if user_settings and user_settings.daily_token_quota else None)
+        or get_runtime_value(db, "user_daily_token_quota")
+    )
+    return {
+        "enabled": True,
+        "quota": quota,
+        "used": used,
+        "remaining": max(quota - used, 0),
+        "exceeded": used >= quota,
+    }

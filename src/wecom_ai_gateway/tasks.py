@@ -7,11 +7,11 @@ from redis.exceptions import RedisError
 from sqlalchemy import or_, select, update
 from sqlalchemy.exc import IntegrityError
 
-from .config import settings
 from .db import SessionLocal
 from .models import Message, MessageStatus, OutboxStatus, OutboxTask
 from .queueing import notify_worker, redis_client
 from .redaction import redact_error
+from .runtime_settings import get_runtime_value
 
 log = logging.getLogger(__name__)
 
@@ -81,7 +81,7 @@ def add_message_task(db, message_id: str) -> OutboxTask:
 def claim_task() -> OutboxTask | None:
     db = SessionLocal()
     now = utcnow()
-    stale = now - timedelta(seconds=settings.task_lock_timeout_seconds)
+    stale = now - timedelta(seconds=int(get_runtime_value(db, "task_lock_timeout_seconds")))
     try:
         task_id = db.scalar(
             select(OutboxTask.id)
@@ -192,7 +192,7 @@ def fail_task(
         task.last_error = redact_error(error or "unknown error")
         task.locked_at = None
         task.lease_token = None
-        if task.attempts >= settings.task_max_attempts:
+        if task.attempts >= int(get_runtime_value(db, "task_max_attempts")):
             task.status = OutboxStatus.dead
             if task.task_type == "message":
                 message = db.get(Message, task.payload.get("message_id"))
@@ -201,8 +201,8 @@ def fail_task(
                     message.error = task.last_error
         else:
             delay = min(
-                settings.task_retry_base_seconds * (2 ** (task.attempts - 1)),
-                settings.task_retry_max_seconds,
+                int(get_runtime_value(db, "task_retry_base_seconds")) * (2 ** (task.attempts - 1)),
+                int(get_runtime_value(db, "task_retry_max_seconds")),
             )
             task.status = OutboxStatus.pending
             task.available_at = utcnow() + timedelta(seconds=delay)

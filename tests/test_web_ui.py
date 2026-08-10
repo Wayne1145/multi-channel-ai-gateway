@@ -21,3 +21,18 @@ def test_qrcode_ui_uses_protected_blob_endpoint_only():
     assert ".blob()" in js
     assert "window.open" not in js
     assert "qrcode_url" not in js
+
+
+def test_settings_view_navigation_and_save_wiring():
+    html = (ROOT / "web/index.html").read_text(encoding="utf-8")
+    js = (ROOT / "web/static/app.js").read_text(encoding="utf-8")
+
+    assert 'data-view="settings"' in html
+    assert 'id="view-settings"' in html
+    assert 'id="settings-groups"' in html
+    assert 'id="settings-save"' in html
+    assert 'id="login-announcement"' in html
+    assert 'id="quota-box"' in html
+    assert '"/api/admin/settings"' in js
+    assert '"settings-save"' in js
+    assert "announcement" in js

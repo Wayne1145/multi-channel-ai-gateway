@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 
 from .config import settings
 from .models import MediaAsset
+from .runtime_settings import get_runtime_value
 
 # 媒体类型 → 允许的 mime 前缀（宽松匹配，允许带 charset 等参数）
 _ALLOWED_PREFIXES = {
@@ -25,8 +26,9 @@ _ALLOWED_PREFIXES = {
 }
 
 
-def _allowed_mimes() -> set[str]:
-    return {m.strip().lower() for m in settings.media_allowed_mime_types.split(",") if m.strip()}
+def _allowed_mimes(db: Session | None = None) -> set[str]:
+    raw = get_runtime_value(db, "media_allowed_mime_types") if db else settings.media_allowed_mime_types
+    return {m.strip().lower() for m in str(raw).split(",") if m.strip()}
 
 
 def _classify(mime: str | None, media_type: str | None) -> str:
@@ -47,7 +49,7 @@ def _sha256_hex(data: bytes | None) -> str | None:
     return hashlib.sha256(data).hexdigest()
 
 
-def validate_media_item(item: dict) -> tuple[bool, str | None]:
+def validate_media_item(item: dict, db: Session | None = None) -> tuple[bool, str | None]:
     """校验单个媒体条目：(是否通过, 拒绝原因)。
 
     仅当显式给出 mime 且不在白名单内时拒绝；未提供 mime 的条目按
@@ -55,9 +57,10 @@ def validate_media_item(item: dict) -> tuple[bool, str | None]:
     """
     mime = (item.get("mime") or item.get("content_type") or "").strip().lower()
     size = int(item.get("size_bytes") or 0)
-    if size > settings.media_max_size_bytes:
-        return False, f"size_exceeds_limit:{settings.media_max_size_bytes}"
-    if mime and mime not in _allowed_mimes():
+    max_size = int(get_runtime_value(db, "media_max_size_bytes")) if db else settings.media_max_size_bytes
+    if size > max_size:
+        return False, f"size_exceeds_limit:{max_size}"
+    if mime and mime not in _allowed_mimes(db):
         return False, f"mime_not_allowed:{mime}"
     return True, None
 
@@ -71,14 +74,16 @@ def record_media_items(
     url|file_id|media_id, data(可选 bytes)}。管理端不会看到 storage_key。
     """
     rows: list[MediaAsset] = []
-    expires = datetime.now(UTC) + timedelta(hours=settings.media_retention_hours)
+    expires = datetime.now(UTC) + timedelta(
+        hours=int(get_runtime_value(db, "media_retention_hours"))
+    )
     for item in media or []:
         if not isinstance(item, dict):
             continue
         mime = (item.get("mime") or item.get("content_type") or "").strip().lower() or None
         media_type = _classify(mime, item.get("media_type") or item.get("type"))
         size = int(item.get("size_bytes") or 0)
-        ok, reason = validate_media_item(item)
+        ok, reason = validate_media_item(item, db)
         storage_key = item.get("url") or item.get("file_id") or item.get("media_id")
         row = MediaAsset(
             message_id=message_id,

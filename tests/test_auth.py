@@ -157,8 +157,16 @@ def test_auth_config_reports_registration_availability(monkeypatch):
     monkeypatch.setattr(settings, "allow_public_registration", True)
     enabled = client.get("/api/auth/config")
 
-    assert disabled_by_default.json() == {"registration_enabled": False}
-    assert enabled.json() == {"registration_enabled": True}
+    assert disabled_by_default.json() == {
+        "registration_enabled": False,
+        "announcement": "",
+        "maintenance_mode": False,
+    }
+    assert enabled.json() == {
+        "registration_enabled": True,
+        "announcement": "",
+        "maintenance_mode": False,
+    }
 
 
 def test_admin_provisions_existing_user_account_without_exposing_hash():

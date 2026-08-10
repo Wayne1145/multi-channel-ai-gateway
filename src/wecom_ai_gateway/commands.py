@@ -18,6 +18,7 @@ from .models import (
     UserSettings,
 )
 from .policy import resolve_user_mode
+from .runtime_settings import get_runtime_value
 from .security import decrypt_secret, encrypt_secret
 
 
@@ -118,7 +119,7 @@ def execute(db: Session, user_id: str, text: str) -> CommandResult:
             return CommandResult(True, "人设已更新，仅对你的会话生效。")
         return CommandResult(True, "用法：/persona show | set <内容> | reset")
     if cmd in {"/temperature", "/max-tokens", "/context"}:
-        return _set_parameter(user_settings, cmd, parts)
+        return _set_parameter(db, user_settings, cmd, parts)
     if cmd == "/new":
         db.query(Conversation).filter_by(user_id=user_id, status="active").update({"status": "closed"})
         return CommandResult(True, "新的会话已经开始。")
@@ -149,8 +150,10 @@ def execute(db: Session, user_id: str, text: str) -> CommandResult:
                 func.coalesce(func.sum(UsageRecord.prompt_tokens + UsageRecord.completion_tokens), 0)
             ).where(UsageRecord.user_id == user_id, UsageRecord.created_at >= start)
         )
-        quota = user_settings.daily_token_quota or settings.user_daily_token_quota
-        return CommandResult(True, f"今日已使用约 {total} tokens；额度 {quota}。")
+        from .services import quota_status
+        status = quota_status(db, user_id, user_settings)
+        extra = f"（已用 {status['used']}/{status['quota']}）" if status["enabled"] else "（配额未启用）"
+        return CommandResult(True, f"今日已使用约 {total} tokens；额度 {status['quota']}{extra}。")
     if cmd == "/card":
         return _card_command(db, user_id, parts, user_settings)
     if cmd == "/preset":
@@ -158,7 +161,7 @@ def execute(db: Session, user_id: str, text: str) -> CommandResult:
     return CommandResult(True, "未知命令。发送 /help 查看可用命令。")
 
 
-def _set_parameter(user_settings: UserSettings, cmd: str, parts: list[str]) -> CommandResult:
+def _set_parameter(db: Session, user_settings: UserSettings, cmd: str, parts: list[str]) -> CommandResult:
     if len(parts) < 2:
         return CommandResult(True, "缺少参数。")
     try:
@@ -172,7 +175,7 @@ def _set_parameter(user_settings: UserSettings, cmd: str, parts: list[str]) -> C
             user_settings.max_tokens = value
         else:
             value = int(parts[1])
-            assert 2 <= value <= 100
+            assert 2 <= value <= int(get_runtime_value(db, "max_context_messages"))
             user_settings.context_messages = value
         return CommandResult(True, "参数已更新。")
     except (ValueError, AssertionError):
@@ -206,8 +209,12 @@ def _memory_command(
         )
         return CommandResult(True, listing)
     if action == "add" and len(parts) >= 3:
+        limit = int(get_runtime_value(db, "max_memories_per_user"))
+        if len(rows) >= limit:
+            return CommandResult(True, f"记忆条数已达上限（{limit} 条），请先删除旧记忆。")
+        max_chars = int(get_runtime_value(db, "memory_max_chars"))
         db.add(
-            Memory(user_id=user_id, content="", content_encrypted=encrypt_secret(parts[2][:2000]))
+            Memory(user_id=user_id, content="", content_encrypted=encrypt_secret(parts[2][:max_chars]))
         )
         return CommandResult(True, "这条记忆已保存。")
     if action == "delete" and len(parts) >= 3:
@@ -275,6 +282,10 @@ def _card_command(
         )
         if exists:
             return CommandResult(True, f"角色卡「{name}」已存在。")
+        limit = int(get_runtime_value(db, "max_cards_per_user"))
+        count = db.scalar(select(func.count()).select_from(CharacterCard).where(CharacterCard.user_id == user_id)) or 0
+        if count >= limit:
+            return CommandResult(True, f"角色卡数量已达上限（{limit} 张），请先删除旧卡。")
         card = CharacterCard(user_id=user_id, name=name, format="soul_md", content_encrypted=None)
         db.add(card)
         db.flush()
@@ -294,7 +305,7 @@ def _card_command(
         card = _active_card(db, user_settings)
         if not card:
             return CommandResult(True, "当前没有激活的角色卡。先 /card new <名称> 创建一张。")
-        content = parts[2][:20000]
+        content = parts[2][: int(get_runtime_value(db, "card_max_chars"))]
         fmt = card_service.detect_format(content)
         card.format = fmt
         card.content_encrypted = card_service.encrypt_card_content(content)
@@ -357,6 +368,12 @@ def _preset_command(
         return CommandResult(True, "\n".join(f"- {row.name}" for row in rows))
     if action == "save" and len(parts) >= 3:
         name = parts[2].strip()[:120]
+        limit = int(get_runtime_value(db, "max_presets_per_user"))
+        existing = preset_service.list_presets(db, user_id)
+        if any(row.name == name for row in existing):
+            pass  # 同名覆盖不占新名额
+        elif len(existing) >= limit:
+            return CommandResult(True, f"预设数量已达上限（{limit} 个），请先删除旧预设。")
         preset_service.save_preset(db, user_id, name, preset_service.snapshot_settings(user_settings))
         return CommandResult(True, f"预设「{name}」已保存。")
     if action == "use" and len(parts) >= 3:

@@ -14,7 +14,17 @@ from qrcode.image.svg import SvgPathImage
 from sqlalchemy import delete, func, or_, select
 from sqlalchemy.orm import Session
 
-from .auth import Principal, create_session, login, normalize_username, principal_from_bearer, revoke_session
+from .auth import (
+    Principal,
+    clear_login_failures,
+    create_session,
+    is_login_locked,
+    login,
+    normalize_username,
+    principal_from_bearer,
+    record_login_failure,
+    revoke_session,
+)
 from .cards import detect_format, encrypt_card_content, extract_card_from_png
 from .channels import ChannelMessage, registry
 from .clawbot import register_clawbot_adapter
@@ -24,6 +34,7 @@ from .media import list_media_metadata
 from .migration import migrate_user_mode
 from .models import (
     Account,
+    AuditLog,
     AuthSession,
     ChannelInstance,
     CharacterCard,
@@ -45,8 +56,9 @@ from .models import (
 from .policy import resolve_user_mode
 from .queueing import enqueue_sync
 from .redaction import redact_error
+from .runtime_settings import get_runtime_value, settings_view, update_settings
 from .security import hash_password, verify_admin_token
-from .services import ingest_channel_message
+from .services import ingest_channel_message, quota_status
 from .tasks import replay_task
 from .wecom import decrypt, parse_callback, verify_signature
 
@@ -142,20 +154,27 @@ class AccountProvisionIn(LoginIn):
 @app.get("/api/auth/config")
 def auth_config(db: Session = Depends(db_dep)):
     return {
-        "registration_enabled": settings.allow_public_registration
+        "registration_enabled": bool(get_runtime_value(db, "allow_public_registration"))
         and not settings.single_user_mode
-        and resolve_user_mode(db, None) == "self_service"
+        and resolve_user_mode(db, None) == "self_service",
+        "announcement": get_runtime_value(db, "announcement"),
+        "maintenance_mode": bool(get_runtime_value(db, "maintenance_mode")),
     }
 
 
 @app.post("/api/auth/login")
 def auth_login(body: LoginIn, db: Session = Depends(db_dep)):
+    normalized = normalize_username(body.username)
+    if is_login_locked(normalized):
+        raise HTTPException(429, "登录失败次数过多，请稍后再试")
     try:
         result = login(db, body.username, body.password)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     if not result:
+        record_login_failure(normalized)
         raise HTTPException(401, "账号或密码错误")
+    clear_login_failures(normalized)
     token, principal = result
     return {
         "token": token,
@@ -168,14 +187,14 @@ def auth_login(body: LoginIn, db: Session = Depends(db_dep)):
 @app.post("/api/auth/register")
 def auth_register(body: RegisterIn, db: Session = Depends(db_dep)):
     if (
-        not settings.allow_public_registration
+        not bool(get_runtime_value(db, "allow_public_registration"))
         or settings.single_user_mode
         or resolve_user_mode(db, None) != "self_service"
     ):
         raise HTTPException(403, "当前平台未开放用户注册")
     try:
         username = normalize_username(body.username)
-        password_hash = hash_password(body.password)
+        password_hash = hash_password(body.password, min_length=int(get_runtime_value(db, "password_min_length")))
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     if username == settings.admin_username.strip().lower():
@@ -235,6 +254,8 @@ def my_summary(
         .join(Message, Message.id == MediaAsset.message_id)
         .where(Message.user_id == user_id)
     )
+    quota = quota_status(db, user_id, db.get(UserSettings, user_id))
+    quota["alert_threshold"] = int(get_runtime_value(db, "quota_alert_threshold"))
     return {
         "user_id": user_id,
         "display_name": user.display_name,
@@ -246,7 +267,27 @@ def my_summary(
         "cards": count(CharacterCard, CharacterCard.user_id == user_id),
         "presets": count(Preset, Preset.user_id == user_id),
         "providers": count(UserProvider, UserProvider.user_id == user_id),
+        "quota": quota,
     }
+
+
+class SettingsUpdateIn(BaseModel):
+    values: dict
+
+
+@app.get("/api/admin/settings", dependencies=[Depends(admin)])
+def admin_settings(db: Session = Depends(db_dep)):
+    return {"settings": settings_view(db)}
+
+
+@app.put("/api/admin/settings", dependencies=[Depends(admin)])
+def admin_update_settings(body: SettingsUpdateIn, db: Session = Depends(db_dep)):
+    errors = update_settings(db, body.values)
+    if errors:
+        raise HTTPException(400, {"errors": errors})
+    db.add(AuditLog(action="settings.update", detail={"count": len(body.values)}))
+    db.commit()
+    return {"ok": True}
 
 
 @app.get("/api/admin/stats", dependencies=[Depends(admin)])
@@ -321,7 +362,7 @@ def provision_user_account(
         raise HTTPException(404, "user not found")
     try:
         username = normalize_username(body.username)
-        password_hash = hash_password(body.password)
+        password_hash = hash_password(body.password, min_length=int(get_runtime_value(db, "password_min_length")))
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     if username == settings.admin_username.strip().lower():
@@ -625,6 +666,8 @@ def create_my_channel_instance(
     db: Session = Depends(db_dep),
 ):
     assert principal.user_id is not None
+    if not bool(get_runtime_value(db, "allow_user_clawbot_instances")):
+        raise HTTPException(403, "当前平台未开放用户自助创建实例")
     name = body.instance_name.strip()[:120]
     if not name:
         raise HTTPException(400, "instance_name is required")

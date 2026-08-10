@@ -86,6 +86,7 @@ async def main():
     log.info("任务 Worker 已启动（持久化 Outbox 模式）")
     last_reconcile = 0.0
     last_media_cleanup = 0.0
+    last_retention_cleanup = 0.0
     while True:
         now = asyncio.get_running_loop().time()
         if now - last_reconcile >= 60:
@@ -107,6 +108,20 @@ async def main():
             finally:
                 db.close()
             last_media_cleanup = now
+        if now - last_retention_cleanup >= 3600:
+            from .db import SessionLocal
+            from .retention import cleanup_expired_data
+
+            db = SessionLocal()
+            try:
+                removed = cleanup_expired_data(db)
+                if sum(removed.values()):
+                    log.info("数据保留清理：%s", removed)
+            except Exception:
+                log.exception("数据保留清理失败")
+            finally:
+                db.close()
+            last_retention_cleanup = now
         processed = await drain_available_tasks()
         if processed:
             continue

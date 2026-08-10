@@ -45,7 +45,7 @@
   /* ---------- 视图切换 ---------- */
   const TITLES = {
     dashboard: "仪表盘", users: "用户", instances: "渠道实例",
-    media: "媒体审计", messages: "消息", tasks: "死信任务",
+    media: "媒体审计", messages: "消息", tasks: "死信任务", settings: "平台设置",
   };
   function switchView(name) {
     document.querySelectorAll(".nav-item").forEach((b) =>
@@ -59,6 +59,7 @@
     if (name === "media") loadMedia();
     if (name === "messages") loadMessages();
     if (name === "tasks") loadTasks();
+    if (name === "settings") loadSettings();
   }
 
   /* ---------- 登录 / 退出 ---------- */
@@ -161,6 +162,15 @@
           <div class="detail-item"><b>${summary.presets}</b><span>预设</span></div>
           <div class="detail-item"><b>${summary.providers}</b><span>BYOK 供应商</span></div>
           <div class="detail-item"><b>${summary.media_assets}</b><span>媒体记录</span></div>`;
+        if (summary.quota) {
+          const q = summary.quota;
+          const pct = q.quota > 0 ? Math.min(100, Math.round((q.used / q.quota) * 100)) : 0;
+          const warn = q.enabled && pct >= q.alert_threshold;
+          $("quota-box").innerHTML = q.enabled
+            ? `<div class="quota-head"><b>今日用量</b><span class="${warn ? "text-danger" : "muted"}">${q.used.toLocaleString()} / ${q.quota.toLocaleString()} tokens${warn ? " · 接近限额" : ""}</span></div>
+               <div class="quota-bar"><div class="quota-fill ${warn ? "warn" : ""}" style="width:${pct}%"></div></div>`
+            : `<div class="quota-head"><b>每日配额</b><span class="muted">未启用</span></div>`;
+        }
         $("last-updated").innerHTML =
           '<span class="pulse"></span>用户自足模式 · ' + esc(summary.display_name || principal.username);
         return;
@@ -522,11 +532,117 @@
     }
   }
 
+  /* ---------- 平台设置 ---------- */
+  const SETTING_GROUPS = {
+    general: "基础与公告", model: "模型与供应商", account: "用户与账号",
+    quota: "用量与限额", content: "消息与内容", media: "媒体",
+    task: "任务与可靠性", channel: "渠道与 ClawBot", retention: "数据保留",
+  };
+  const groupOrder = ["general", "model", "account", "quota", "content", "media", "task", "channel", "retention"];
+  let settingsState = [];
+
+  function settingInputHtml(s) {
+    if (s.secret) {
+      return `<span class="badge ${s.value.configured ? "badge-ok" : ""}">${s.value.configured ? "已配置（内容仅存于环境变量）" : "未配置"}</span>`;
+    }
+    if (!s.editable) {
+      const val = s.type === "bool" ? (s.value ? "开启" : "关闭") : esc(String(s.value ?? ""));
+      return `<span class="settings-static">${val}</span><span class="badge">仅展示</span>`;
+    }
+    const name = `setting-${s.key}`;
+    if (s.type === "bool") {
+      return `<label class="switch"><input type="checkbox" data-setting="${s.key}" id="${name}" ${s.value ? "checked" : ""}><span class="switch-slider"></span></label>`;
+    }
+    if (s.type === "select") {
+      return `<select class="field settings-input" data-setting="${s.key}" id="${name}">${(s.options || [])
+        .map((o) => `<option value="${esc(o)}" ${String(s.value) === o ? "selected" : ""}>${esc(o)}</option>`).join("")}</select>`;
+    }
+    const isInt = s.type === "int";
+    const attrs = `type="number" ${isInt ? 'step="1"' : 'step="any"'} min="${s.min ?? ""}" max="${s.max ?? ""}"`;
+    const displayVal = s.key === "media_max_size_bytes" && s.value
+      ? Math.round(s.value / (1024 * 1024) * 100) / 100
+      : s.value;
+    const displayUnit = s.key === "media_max_size_bytes" ? "MB" : (s.unit || "");
+    return `<input class="field settings-input" data-setting="${s.key}" id="${name}" ${attrs} value="${esc(String(displayVal))}"><span class="muted small">${esc(displayUnit)}</span>`;
+  }
+
+  function settingValueFromDom(s) {
+    const el = document.querySelector(`[data-setting="${s.key}"]`);
+    if (!el) return undefined;
+    if (s.type === "bool") return el.checked;
+    if (s.type === "int") return el.value === "" ? undefined : parseInt(el.value, 10);
+    if (s.type === "float") return el.value === "" ? undefined : parseFloat(el.value);
+    if (s.type === "select") return el.value;
+    return el.value;
+  }
+
+  function renderSettings() {
+    const box = $("settings-groups");
+    box.innerHTML = groupOrder.map((group) => {
+      const items = settingsState.filter((s) => s.group === group);
+      if (!items.length) return "";
+      return `
+        <div class="settings-group">
+          <h3>${SETTING_GROUPS[group] || group}</h3>
+          ${items.map((s) => `
+            <div class="settings-item">
+              <div class="settings-info">
+                <div class="settings-label">${esc(s.label)}</div>
+                <div class="settings-desc">${esc(s.description || "")}</div>
+              </div>
+              <div class="settings-control">${settingInputHtml(s)}</div>
+            </div>`).join("")}
+        </div>`;
+    }).join("");
+  }
+
+  async function loadSettings() {
+    try {
+      const data = await api("/api/admin/settings");
+      settingsState = data.settings;
+      renderSettings();
+    } catch (ex) {
+      toast(ex.message, true);
+    }
+  }
+
+  async function saveSettings() {
+    const values = {};
+    settingsState.forEach((s) => {
+      if (!s.editable || s.secret) return;
+      const v = settingValueFromDom(s);
+      if (v !== undefined) values[s.key] = v;
+    });
+    if (!Object.keys(values).length) {
+      toast("没有可保存的设置", true);
+      return;
+    }
+    try {
+      await api("/api/admin/settings", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ values }),
+      });
+      toast("设置已保存并生效");
+      loadSettings();
+    } catch (ex) {
+      toast(ex.message, true);
+    }
+  }
+
   /* ---------- 启动 ---------- */
   fetch("/api/auth/config")
     .then((res) => res.json())
-    .then((cfg) => $("register-toggle").classList.toggle("hidden", !cfg.registration_enabled))
+    .then((cfg) => {
+      $("register-toggle").classList.toggle("hidden", !cfg.registration_enabled);
+      if (cfg.announcement) {
+        const el = $("login-announcement");
+        el.textContent = "公告：" + cfg.announcement;
+        el.classList.remove("hidden");
+      }
+    })
     .catch(() => {});
+  $("settings-save").addEventListener("click", saveSettings);
   if (token) {
     api("/api/auth/me")
       .then((auth) => {
