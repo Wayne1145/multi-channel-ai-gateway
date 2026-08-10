@@ -325,8 +325,26 @@ async def process_message(message_id: str) -> None:
         row.metadata_json = metadata
         db.commit()
 
+        chunk_limit = int(get_runtime_value(db, "message_chunk_chars"))
+        chunks = _split_reply(answer, chunk_limit) if len(answer) > chunk_limit else [answer]
         if row.channel == "wecom_kf":
-            sent_id = await client.send_text(account_id, external_id, answer)
+            sent_id = ""
+            for chunk in chunks:
+                sent_id = await client.send_text(account_id, external_id, chunk)
+                db.add(
+                    Message(
+                        conversation_id=row.conversation_id,
+                        user_id=row.user_id,
+                        channel=row.channel,
+                        channel_instance_id=account_id,
+                        external_message_id=sent_id or f"local:{row.id}",
+                        direction=MessageDirection.outbound,
+                        message_type="text",
+                        content=chunk,
+                        status=MessageStatus.sent,
+                        metadata_json={"reply_to": row.external_message_id, "chunk": len(chunks) > 1},
+                    )
+                )
             outbound_media = list(metadata.get("media") or [])
             for media in outbound_media:
                 media_msg_id = await client.send_media(account_id, external_id, media)
@@ -346,15 +364,31 @@ async def process_message(message_id: str) -> None:
                 )
         else:
             adapter = registry.get(row.channel)
-            sent_id = await adapter.send(
-                OutgoingMessage(
-                    channel=row.channel,
-                    instance_id=account_id,
-                    to_sender_id=external_id,
-                    text=answer,
-                    metadata={"reply_to": row.external_message_id},
+            sent_id = ""
+            for chunk in chunks:
+                sent_id = await adapter.send(
+                    OutgoingMessage(
+                        channel=row.channel,
+                        instance_id=account_id,
+                        to_sender_id=external_id,
+                        text=chunk,
+                        metadata={"reply_to": row.external_message_id},
+                    )
                 )
-            )
+                db.add(
+                    Message(
+                        conversation_id=row.conversation_id,
+                        user_id=row.user_id,
+                        channel=row.channel,
+                        channel_instance_id=account_id,
+                        external_message_id=sent_id or f"local:{row.id}",
+                        direction=MessageDirection.outbound,
+                        message_type="text",
+                        content=chunk,
+                        status=MessageStatus.sent,
+                        metadata_json={"reply_to": row.external_message_id, "chunk": len(chunks) > 1},
+                    )
+                )
             outbound_media = list(metadata.get("media") or [])
             for media in outbound_media:
                 media_msg_id = await adapter.send_media(
@@ -381,20 +415,6 @@ async def process_message(message_id: str) -> None:
                         metadata_json={"reply_to": row.external_message_id, "media": True},
                     )
                 )
-        db.add(
-            Message(
-                conversation_id=row.conversation_id,
-                user_id=row.user_id,
-                channel=row.channel,
-                channel_instance_id=account_id,
-                external_message_id=sent_id or f"local:{row.id}",
-                direction=MessageDirection.outbound,
-                message_type="text",
-                content=answer,
-                status=MessageStatus.sent,
-                metadata_json={"reply_to": row.external_message_id},
-            )
-        )
         metadata["reply_dispatch"] = "sent"
         row.metadata_json = metadata
         row.status = MessageStatus.sent
@@ -495,6 +515,38 @@ async def _complete_ai(db, row: Message, conversation: Conversation, user_settin
         )
     )
     return result.content
+
+
+def _split_reply(text: str, limit: int) -> list[str]:
+    """把长回复按字符数拆片；优先在换行/句末标点处断开，避免切断语义。
+
+    每片长度严格不超过 limit；无断点时按 limit 硬切。
+    """
+    if not text:
+        return []
+    if len(text) <= limit:
+        return [text]
+    chunks: list[str] = []
+    rest = text
+    break_chars = ("。", "！", "？", "；", "，", ".", "!", "?", ";", ",")
+    while len(rest) > limit:
+        newline = rest.rfind("\n", 0, limit)
+        if newline > limit // 2:
+            cut = newline
+        else:
+            cut = max((rest.rfind(c, 0, limit) for c in break_chars), default=-1)
+            if cut <= limit // 2:
+                cut = limit
+        chunk = rest[: cut + 1] if cut < limit else rest[:limit]
+        chunk = chunk.strip()
+        if chunk:
+            chunks.append(chunk)
+        rest = rest[len(chunk) :].lstrip() if chunk else rest[limit:]
+        if not rest:
+            break
+    if rest:
+        chunks.append(rest.strip())
+    return [c for c in chunks if c]
 
 
 def quota_status(db, user_id: str, user_settings) -> dict:

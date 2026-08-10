@@ -223,24 +223,33 @@
     try {
       const rows = await api("/api/admin/users?limit=200");
       const q = ($("user-search").value || "").trim().toLowerCase();
-      const list = q ? rows.filter((u) => (u.id + (u.display_name || "")).toLowerCase().includes(q)) : rows;
+      const list = q ? rows.filter((u) => (u.id + (u.display_name || "") + (u.account_username || "") + JSON.stringify(u.identities || [])).toLowerCase().includes(q)) : rows;
       $("user-tbody").innerHTML = list.length
         ? list.map((u) => {
           const modeLabel = u.mode === "managed" ? "统一管理" : u.mode === "self_service" ? "自足" : "跟随平台";
           const toggleTo = u.mode === "managed" ? "self_service" : "managed";
+          const identityBadges = (u.identities || []).map((idn) =>
+            `<span class="badge" title="${esc(idn.channel)}">${esc(idn.channel === "wecom_kf" ? "企微" : "微信")} ${esc(idn.masked)}</span>`).join(" ");
+          const displayName = u.display_name || (u.identities && u.identities[0] ? u.identities[0].masked : u.id.slice(0, 8));
           return `
           <tr>
             <td class="mono">${esc(u.id.slice(0, 8))}</td>
-            <td>${esc(u.display_name || "—")}</td>
+            <td>
+              <div>${esc(displayName)}</div>
+              <div class="small muted">${identityBadges}</div>
+            </td>
+            <td>${u.account_username ? `<span class="badge badge-ok">${esc(u.account_username)}</span>` : '<span class="badge">未分配</span>'}</td>
             <td class="mono">${esc(u.model || "默认")}</td>
             <td>
               <span class="badge">${esc(modeLabel)}</span>
               <button class="btn btn-sm" data-mode="${u.id}" data-mode-val="${toggleTo}" title="切换用户模式">${u.mode ? "切回" : "设为统一管理"}</button>
             </td>
-            <td><button class="btn btn-sm" data-detail="${u.id}" data-name="${esc(u.display_name || u.id)}" data-username="${esc(u.account_username || "")}">详情</button></td>
             <td>${u.blocked ? '<span class="badge badge-dead">已封禁</span>' : '<span class="badge badge-ok">正常</span>'}</td>
             <td class="mono small">${esc((u.created_at || "").replace("T", " ").slice(0, 19))}</td>
-            <td><button class="btn btn-sm ${u.blocked ? "" : "btn-danger"}" data-block="${u.id}" data-state="${u.blocked ? "0" : "1"}">${u.blocked ? "解封" : "封禁"}</button></td>
+            <td class="me-actions">
+              <button class="btn btn-sm" data-detail="${u.id}" data-name="${esc(displayName)}" data-username="${esc(u.account_username || "")}">详情</button>
+              <button class="btn btn-sm ${u.blocked ? "" : "btn-danger"}" data-block="${u.id}" data-state="${u.blocked ? "0" : "1"}">${u.blocked ? "解封" : "封禁"}</button>
+            </td>
           </tr>`; }).join("")
         : '<tr><td colspan="8" class="muted">暂无用户</td></tr>';
       document.querySelectorAll("[data-block]").forEach((b) =>
@@ -289,6 +298,7 @@
       $("user-modal").dataset.userId = userId;
       $("account-username").value = accountUsername || "";
       $("account-password").value = "";
+      $("display-name-input-admin").value = (name && !name.startsWith("未命名") && name !== "(未命名)") ? name : "";
       $("user-detail-grid").innerHTML = [
         ["会话数", detail.conversations],
         ["记忆条数", detail.memories],
@@ -695,7 +705,10 @@
     $("me-card-tbody").innerHTML = myCards.length
       ? myCards.map((c) => `
           <tr>
-            <td>${escHtml(c.name)}</td>
+            <td>
+              <div>${escHtml(c.name)}</div>
+              <div class="small muted">${escHtml(c.content_preview || "（空内容）")}</div>
+            </td>
             <td class="muted small">${escHtml(c.format)}</td>
             <td>${c.active ? '<span class="badge">激活中</span>' : ""}</td>
             <td class="me-actions">
@@ -890,6 +903,18 @@
     })
     .catch(() => {});
   $("settings-save").addEventListener("click", saveSettings);
+  $("display-name-save").addEventListener("click", async () => {
+    const userId = $("user-modal").dataset.userId;
+    if (!userId) return;
+    const displayName = $("display-name-input-admin").value.trim();
+    await api(`/api/admin/users/${userId}/display-name`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ display_name: displayName }),
+    });
+    toast("显示名称已更新");
+    loadUsers();
+  });
   if (token) {
     api("/api/auth/me")
       .then((auth) => {

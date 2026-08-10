@@ -55,3 +55,11 @@ def test_settings_view_navigation_and_save_wiring():
     assert '"/api/me/password' in js
     assert '"/api/me/sessions/revoke-all' in js
     assert '"/api/me/usage' in js
+    # 用户列表身份/账号列与改名
+    assert 'identities' in js
+    assert "account_username" in js
+    assert "display-name-save" in html
+    assert "display-name-input-admin" in html
+    assert "/display-name" in js
+    # 角色卡内容预览
+    assert "content_preview" in js

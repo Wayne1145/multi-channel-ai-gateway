@@ -111,6 +111,9 @@ SPECS: list[SettingSpec] = [
     SettingSpec("quota_alert_threshold", "quota", "配额告警阈值（%）", "int", default=90, min=50, max=100,
                 unit="%", description="当日用量达到该百分比时在 /usage 中提示。"),
     # ---------- 5. 消息与内容 ----------
+    SettingSpec("message_chunk_chars", "content", "回复分片长度（字符）", "int", default=1500,
+                min=200, max=4000, unit="字符",
+                description="模型回复超长时按该长度拆成多条依次发送，避免触发微信单条上限。"),
     SettingSpec("message_max_chars", "content", "单条消息长度上限", "int", default=10000,
                 min=100, max=100_000, unit="字符",
                 description="入站文本超过上限时截断，避免超大输入拖垮上下文。"),

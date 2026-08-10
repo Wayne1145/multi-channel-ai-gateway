@@ -46,6 +46,7 @@ from .models import (
     Account,
     AuditLog,
     AuthSession,
+    ChannelIdentity,
     ChannelInstance,
     CharacterCard,
     CommandPolicy,
@@ -74,7 +75,7 @@ from .runtime_settings import (
     settings_view,
     update_settings,
 )
-from .security import hash_password, verify_admin_token
+from .security import decrypt_secret, hash_password, verify_admin_token
 from .services import ingest_channel_message, quota_status
 from .tasks import replay_task
 from .wecom import decrypt, parse_callback, verify_signature
@@ -325,6 +326,10 @@ class SettingsUpdateIn(BaseModel):
     values: dict
 
 
+class DisplayNameIn(BaseModel):
+    display_name: str
+
+
 @app.get("/api/admin/settings", dependencies=[Depends(admin)])
 def admin_settings(db: Session = Depends(db_dep)):
     return {"settings": settings_view(db)}
@@ -494,7 +499,18 @@ def my_cards(principal: Principal = Depends(current_user), db: Session = Depends
         .where(CharacterCard.user_id == principal.user_id)
         .order_by(CharacterCard.created_at)
     )
-    return [_card_meta(row) for row in rows]
+    result = []
+    for row in rows:
+        meta = _card_meta(row)
+        preview = ""
+        if row.content_encrypted:
+            try:
+                preview = decrypt_card_content(row.content_encrypted)[:60]
+            except Exception:  # noqa: BLE001 - 密钥轮换时预览为空
+                preview = ""
+        meta["content_preview"] = preview
+        result.append(meta)
+    return result
 
 
 @app.get("/api/me/cards/{card_id}")
@@ -1001,19 +1017,56 @@ def users(db: Session = Depends(db_dep), limit: int = 50):
         .order_by(User.created_at.desc())
         .limit(min(limit, 200))
     ).all()
-    return [
-        {
-            "id": u.id,
-            "display_name": u.display_name,
-            "blocked": u.is_blocked,
-            "created_at": u.created_at,
-            "model": s.model if s else None,
-            "mode": u.mode,
-            "effective_mode": resolve_user_mode(db, u),
-            "account_username": a.username if a else None,
-        }
-        for u, s, a in rows
-    ]
+    identities_map: dict[str, list[ChannelIdentity]] = {}
+    for identity, uid in db.execute(
+        select(ChannelIdentity, ChannelIdentity.user_id)
+    ).all():
+        identities_map.setdefault(uid, []).append(identity)
+    result = []
+    for u, s, a in rows:
+        id_list = []
+        for identity in identities_map.get(u.id, []):
+            try:
+                external = decrypt_secret(identity.external_id_encrypted)
+            except Exception:  # noqa: BLE001 - 密钥轮换等情况下仅显示未知
+                external = ""
+            masked = _mask_external_id(external)
+            id_list.append({"channel": identity.channel, "masked": masked})
+        result.append(
+            {
+                "id": u.id,
+                "display_name": u.display_name,
+                "blocked": u.is_blocked,
+                "created_at": u.created_at,
+                "model": s.model if s else None,
+                "mode": u.mode,
+                "effective_mode": resolve_user_mode(db, u),
+                "account_username": a.username if a else None,
+                "identities": id_list,
+            }
+        )
+    return result
+
+
+def _mask_external_id(external_id: str) -> str:
+    """渠道外部 ID 脱敏：保留头部与尾部少量字符，中间打码。"""
+    if not external_id:
+        return "未知"
+    if len(external_id) <= 8:
+        return "****" + external_id[-2:]
+    return external_id[:4] + "****" + external_id[-4:]
+
+
+@app.put("/api/admin/users/{user_id}/display-name", dependencies=[Depends(admin)])
+def user_display_name(user_id: str, body: DisplayNameIn, db: Session = Depends(db_dep)):
+    u = db.get(User, user_id)
+    if not u:
+        raise HTTPException(404, "user not found")
+    name = (body.display_name or "").strip()[:255]
+    u.display_name = name or None
+    db.add(AuditLog(action="user.rename", detail={"user_id": user_id}))
+    db.commit()
+    return {"ok": True, "display_name": u.display_name}
 
 
 @app.put("/api/admin/users/{user_id}/account", dependencies=[Depends(admin)])
