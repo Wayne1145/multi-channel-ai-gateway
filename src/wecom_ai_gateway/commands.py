@@ -167,18 +167,21 @@ def _set_parameter(db: Session, user_settings: UserSettings, cmd: str, parts: li
     try:
         if cmd == "/temperature":
             value = float(parts[1])
-            assert 0 <= value <= 2
+            if not 0 <= value <= 2:
+                return CommandResult(True, "参数超出允许范围。")
             user_settings.temperature = value
         elif cmd == "/max-tokens":
             value = int(parts[1])
-            assert 128 <= value <= 8192
+            if not 128 <= value <= 8192:
+                return CommandResult(True, "参数超出允许范围。")
             user_settings.max_tokens = value
         else:
             value = int(parts[1])
-            assert 2 <= value <= int(get_runtime_value(db, "max_context_messages"))
+            if not 2 <= value <= int(get_runtime_value(db, "max_context_messages")):
+                return CommandResult(True, "参数超出允许范围。")
             user_settings.context_messages = value
         return CommandResult(True, "参数已更新。")
-    except (ValueError, AssertionError):
+    except (ValueError, TypeError):
         return CommandResult(True, "参数超出允许范围。")
 
 

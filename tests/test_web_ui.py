@@ -36,3 +36,5 @@ def test_settings_view_navigation_and_save_wiring():
     assert '"/api/admin/settings"' in js
     assert '"settings-save"' in js
     assert "announcement" in js
+    # 媒体大小上限界面按 MB 显示，保存时必须换算回字节，否则会把 20MB 存成 20 字节
+    assert 's.key === "media_max_size_bytes" ? n * 1024 * 1024 : n' in js

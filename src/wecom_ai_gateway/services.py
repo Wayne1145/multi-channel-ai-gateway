@@ -191,6 +191,8 @@ def ingest(db, item: dict) -> None:
     user = resolve_user(db, external_id, open_kfid) if external_id else None
     conversation = active_conversation(db, user.id) if user else None
     content = (item.get("text") or {}).get("content") if msgtype == "text" else None
+    if content:
+        content = content[: int(get_runtime_value(db, "message_max_chars"))]
     # 企微媒体消息：image/voice/file 携带 media_id 等定位信息，仅记录安全元数据
     media: list[dict] = []
     if msgtype in {"image", "voice", "file"}:
@@ -478,7 +480,12 @@ async def _complete_ai(db, row: Message, conversation: Conversation, user_settin
         for message in history
     )
     model = user_settings.model or settings.default_model
-    result = await provider_for(provider_name, base_url, api_key).complete(
+    result = await provider_for(
+        provider_name,
+        base_url,
+        api_key,
+        timeout=float(get_runtime_value(db, "request_timeout_seconds")),
+    ).complete(
         prompts,
         model,
         user_settings.temperature if user_settings.temperature is not None else 0.7,

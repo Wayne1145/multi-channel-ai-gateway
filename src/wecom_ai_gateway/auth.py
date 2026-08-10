@@ -101,10 +101,10 @@ def is_login_locked(username: str) -> bool:
 def record_login_failure(username: str) -> None:
     try:
         redis = redis_client()
-        attempts = redis.incr(_login_lock_key(username))
+        redis.incr(_login_lock_key(username))
         lock_minutes = int(get_runtime_value(SessionLocal(), "login_lock_minutes"))
-        if attempts == 1:
-            redis.expire(_login_lock_key(username), lock_minutes * 60)
+        # 每次失败都刷新 TTL，避免残留无过期 key 永久累积计数
+        redis.expire(_login_lock_key(username), lock_minutes * 60)
     except Exception:  # noqa: BLE001 - 登录失败计数丢失不影响正确性
         log.warning("记录登录失败计数失败 username=%s", username)
 

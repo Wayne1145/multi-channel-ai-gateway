@@ -15,9 +15,15 @@ class CompletionResult:
 class OpenAICompatibleProvider:
     """OpenAI 兼容供应商。base_url/api_key 可覆盖（用户 BYOK 时注入解密后的值）。"""
 
-    def __init__(self, base_url: str | None = None, api_key: str | None = None):
+    def __init__(
+        self,
+        base_url: str | None = None,
+        api_key: str | None = None,
+        timeout: float | None = None,
+    ):
         self._base_url = (base_url or settings.openai_compatible_base_url).rstrip("/")
         self._api_key = api_key if api_key is not None else settings.openai_compatible_api_key
+        self._timeout = timeout if timeout is not None else settings.request_timeout_seconds
 
     async def complete(
         self, messages: list[dict], model: str, temperature: float, max_tokens: int
@@ -32,7 +38,7 @@ class OpenAICompatibleProvider:
             "max_tokens": max_tokens,
             "stream": False,
         }
-        async with httpx.AsyncClient(timeout=settings.request_timeout_seconds) as client:
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
             r = await client.post(
                 self._base_url + "/chat/completions",
                 headers=headers,
@@ -58,7 +64,12 @@ class OpenAICompatibleProvider:
         )
 
 
-def provider_for(name: str, base_url: str | None = None, api_key: str | None = None):
+def provider_for(
+    name: str,
+    base_url: str | None = None,
+    api_key: str | None = None,
+    timeout: float | None = None,
+):
     if name == "openai-compatible":
-        return OpenAICompatibleProvider(base_url=base_url, api_key=api_key)
+        return OpenAICompatibleProvider(base_url=base_url, api_key=api_key, timeout=timeout)
     raise ValueError(f"不支持的供应商：{name}")

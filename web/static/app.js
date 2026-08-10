@@ -570,7 +570,12 @@
     const el = document.querySelector(`[data-setting="${s.key}"]`);
     if (!el) return undefined;
     if (s.type === "bool") return el.checked;
-    if (s.type === "int") return el.value === "" ? undefined : parseInt(el.value, 10);
+    if (s.type === "int") {
+      if (el.value === "") return undefined;
+      const n = parseInt(el.value, 10);
+      // 媒体大小上限在界面以 MB 显示，存储为字节
+      return s.key === "media_max_size_bytes" ? n * 1024 * 1024 : n;
+    }
     if (s.type === "float") return el.value === "" ? undefined : parseFloat(el.value);
     if (s.type === "select") return el.value;
     return el.value;
