@@ -224,6 +224,27 @@ class PlatformConfig(Base):
     )
 
 
+class SettingOverride(Base):
+    """渠道/用户级设置覆盖；解析优先级：用户 > 渠道 > 平台配置 > .env。"""
+
+    __tablename__ = "setting_overrides"
+    __table_args__ = (
+        UniqueConstraint(
+            "scope_type", "scope_id", "key", name="uq_setting_overrides_scope_key"
+        ),
+    )
+    id: Mapped[str] = mapped_column(
+        String(36), primary_key=True, default=lambda: str(uuid.uuid4())
+    )
+    scope_type: Mapped[str] = mapped_column(String(16), index=True)  # user | channel
+    scope_id: Mapped[str] = mapped_column(String(128))
+    key: Mapped[str] = mapped_column(String(120))
+    value: Mapped[dict] = mapped_column(JSON, default=dict)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
 class CharacterCard(Base):
     """用户角色卡槽位。content_encrypted 入库即密文，管理员侧不可读。"""
 

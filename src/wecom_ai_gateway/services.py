@@ -26,7 +26,7 @@ from .models import (
 from .policy import get_command_decision, normalize_command
 from .providers import provider_for
 from .redaction import redact_error
-from .runtime_settings import get_runtime_value
+from .runtime_settings import get_effective_value, get_runtime_value
 from .security import decrypt_secret, encrypt_secret, external_id_hash
 from .tasks import add_message_task
 from .wecom import client
@@ -134,16 +134,14 @@ def ingest_channel_message(db, incoming: ChannelMessage) -> Message | None:
         return None
     content = incoming.content
     if incoming.message_type == "text" and content:
-        content = content[: int(get_runtime_value(db, "message_max_chars"))]
+        content = content[: int(get_effective_value(db, "message_max_chars", channel=incoming.channel))]
     user = resolve_user(db, incoming.sender_id, incoming.instance_id, incoming.channel)
     conversation = active_conversation(db, user.id)
     media = [m for m in (incoming.media or []) if isinstance(m, dict)]
-    maintenance = bool(get_runtime_value(db, "maintenance_mode"))
     should_reply = (
         incoming.message_type == "text"
         and bool(content)
         and not user.is_blocked
-        and not maintenance
     )
     row = Message(
         conversation_id=conversation.id,
@@ -192,18 +190,12 @@ def ingest(db, item: dict) -> None:
     conversation = active_conversation(db, user.id) if user else None
     content = (item.get("text") or {}).get("content") if msgtype == "text" else None
     if content:
-        content = content[: int(get_runtime_value(db, "message_max_chars"))]
+        content = content[: int(get_effective_value(db, "message_max_chars", channel="wecom_kf"))]
     # 企微媒体消息：image/voice/file 携带 media_id 等定位信息，仅记录安全元数据
     media: list[dict] = []
     if msgtype in {"image", "voice", "file"}:
         media = [{"media_type": msgtype, "media_id": item.get("media_id"), "mime": item.get("format")}]
-    should_reply = (
-        origin == 3
-        and msgtype == "text"
-        and user
-        and not user.is_blocked
-        and not bool(get_runtime_value(db, "maintenance_mode"))
-    )
+    should_reply = origin == 3 and msgtype == "text" and user and not user.is_blocked
     row = Message(
         conversation_id=conversation.id if conversation else None,
         user_id=user.id if user else None,
@@ -295,6 +287,8 @@ async def process_message(message_id: str) -> None:
             answer = blocked_answer
         elif command is not None and command.handled:
             answer = command.reply
+        elif bool(get_runtime_value(db, "maintenance_mode")) and not settings.single_user_mode:
+            answer = str(get_runtime_value(db, "maintenance_message"))
         else:
             answer = await _complete_ai(db, row, conversation, user_settings)
 
@@ -518,7 +512,7 @@ def quota_status(db, user_id: str, user_settings) -> dict:
     )
     quota = int(
         (user_settings.daily_token_quota if user_settings and user_settings.daily_token_quota else None)
-        or get_runtime_value(db, "user_daily_token_quota")
+        or get_effective_value(db, "user_daily_token_quota", user_id=user_id)
     )
     return {
         "enabled": True,

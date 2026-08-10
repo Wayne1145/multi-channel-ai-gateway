@@ -125,3 +125,19 @@ def test_login_lock_refreshes_ttl_on_each_failure(monkeypatch):
     auth_module.record_login_failure("ttl-user")
     auth_module.record_login_failure("ttl-user")
     assert fake.expire_calls == 2
+
+
+def test_ip_limit_blocks_after_threshold(monkeypatch, db):
+    """同 IP 超限返回 429；管理员登录不计入 IP 计数。"""
+    import wecom_ai_gateway.auth as auth_module
+
+    fake = FakeRedis()
+    monkeypatch.setattr(auth_module, "redis_client", lambda: fake)
+    update_settings(db, {"login_ip_max_attempts": 10, "login_ip_window_seconds": 900})
+
+    assert auth_module.is_ip_locked("203.0.113.1") is False
+    for _ in range(10):
+        auth_module.record_ip_attempt("203.0.113.1")
+    assert auth_module.is_ip_locked("203.0.113.1") is True
+    auth_module.clear_ip_attempts("203.0.113.1")
+    assert auth_module.is_ip_locked("203.0.113.1") is False

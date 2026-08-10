@@ -209,16 +209,79 @@ def test_user_instance_creation_blocked_by_runtime(db):
     assert response.status_code == 403
 
 
-def test_maintenance_mode_marks_inbound_ignored(db):
-    update_settings(db, {"maintenance_mode": True})
-    row = ingest_channel_message(
-        db,
-        ChannelMessage(
-            channel="wechat_clawbot", instance_id="i-1", sender_id="s-1",
-            external_message_id="m-maint", content="你好",
-        ),
+def test_maintenance_mode_replies_with_notice_instead_of_ai(db, monkeypatch):
+    """维护模式下消息正常入库，但 process 时回复维护提示而不调用模型。"""
+    import asyncio
+
+    from wecom_ai_gateway.channels import ChannelAdapter, OutgoingMessage
+    from wecom_ai_gateway.models import Message, MessageStatus, OutboxStatus, OutboxTask
+    from wecom_ai_gateway.services import process_message
+    from wecom_ai_gateway.tasks import add_message_task
+
+    class FakeAdapter(ChannelAdapter):
+        channel_key = "wechat_clawbot"
+
+        async def start_instance(self, instance_id: str) -> dict:
+            return {"status": "online"}
+
+        async def stop_instance(self, instance_id: str) -> None:
+            return None
+
+        async def send(self, message: OutgoingMessage) -> str:
+            return "fake-outbound-id"
+
+    monkeypatch.setattr(
+        "wecom_ai_gateway.services.registry.get", lambda key: FakeAdapter()
     )
-    assert row.status == "ignored"
+
+    update_settings(db, {"maintenance_mode": True, "maintenance_message": "系统维护中，请稍后再试。"})
+    user = User(display_name="maint", mode="self_service")
+    db.add(user)
+    db.flush()
+    db.add(UserSettings(user_id=user.id))
+    from wecom_ai_gateway.models import ChannelIdentity, Conversation
+    from wecom_ai_gateway.security import encrypt_secret, external_id_hash
+
+    conversation = Conversation(user_id=user.id)
+    db.add(conversation)
+    db.flush()
+    db.add(
+        ChannelIdentity(
+            user_id=user.id,
+            channel="wechat_clawbot",
+            account_id="i-maint",
+            external_id_hash=external_id_hash("sender-maint"),
+            external_id_encrypted=encrypt_secret("sender-maint"),
+        )
+    )
+    row = Message(
+        conversation_id=conversation.id,
+        user_id=user.id,
+        channel="wechat_clawbot",
+        channel_instance_id="i-maint",
+        external_message_id="m-maint-2",
+        direction="inbound",
+        message_type="text",
+        content="你好",
+        status=MessageStatus.queued,
+        metadata_json={"instance_id": "i-maint"},
+    )
+    db.add(row)
+    db.flush()
+    add_message_task(db, row.id)
+    db.commit()
+
+    asyncio.run(process_message(row.id))
+    db.expire_all()
+
+    refreshed = db.get(Message, row.id)
+    assert refreshed.status == MessageStatus.sent
+    outbound = db.query(Message).filter_by(direction="outbound").order_by(Message.created_at.desc()).first()
+    assert outbound is not None
+    assert outbound.content == "系统维护中，请稍后再试。"
+    task = db.query(OutboxTask).filter_by(dedupe_key=f"message:{row.id}").first()
+    # 任务完成由 Worker 的 drain 循环负责；此处只需确认没有进入死信
+    assert task.status != OutboxStatus.dead
 
 
 def test_auth_config_exposes_announcement_and_maintenance(db):

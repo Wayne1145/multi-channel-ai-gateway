@@ -18,7 +18,7 @@ from .models import (
     UserSettings,
 )
 from .policy import resolve_user_mode
-from .runtime_settings import get_runtime_value
+from .runtime_settings import get_effective_value, get_runtime_value
 from .security import decrypt_secret, encrypt_secret
 
 
@@ -177,7 +177,8 @@ def _set_parameter(db: Session, user_settings: UserSettings, cmd: str, parts: li
             user_settings.max_tokens = value
         else:
             value = int(parts[1])
-            if not 2 <= value <= int(get_runtime_value(db, "max_context_messages")):
+            max_context = int(get_effective_value(db, "max_context_messages", user_id=user_settings.user_id))
+            if not 2 <= value <= max_context:
                 return CommandResult(True, "参数超出允许范围。")
             user_settings.context_messages = value
         return CommandResult(True, "参数已更新。")

@@ -93,3 +93,33 @@ def test_me_summary_quota_reflects_runtime_value(db):
     body = client.get("/api/me/summary", headers={"Authorization": f"Bearer {token}"}).json()
 
     assert body["quota"]["quota"] == 12345
+
+
+def test_audit_logs_endpoint_requires_admin_and_returns_rows(db):
+    unauthorized = client.get("/api/admin/audit-logs")
+    assert unauthorized.status_code in (401, 403)
+
+    db.add(AuditLog(action="settings.update", detail={"count": 1}))
+    db.commit()
+    response = client.get("/api/admin/audit-logs", headers=ADMIN_HEADERS)
+    assert response.status_code == 200
+    rows = response.json()
+    assert any(row["action"] == "settings.update" for row in rows)
+
+
+def test_runtime_value_cache_hits_within_session(db):
+    from wecom_ai_gateway.runtime_settings import get_runtime_value
+
+    first = get_runtime_value(db, "task_max_attempts")
+    assert db.info["_runtime_settings_cache"]["task_max_attempts"] == first
+    second = get_runtime_value(db, "task_max_attempts")
+    assert second == first
+
+
+def test_update_settings_invalidates_runtime_cache(db):
+    from wecom_ai_gateway.runtime_settings import get_runtime_value
+
+    get_runtime_value(db, "task_max_attempts")
+    assert "_runtime_settings_cache" in db.info
+    update_settings(db, {"task_max_attempts": 7})
+    assert "_runtime_settings_cache" not in db.info

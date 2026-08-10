@@ -45,7 +45,8 @@
   /* ---------- 视图切换 ---------- */
   const TITLES = {
     dashboard: "仪表盘", users: "用户", instances: "渠道实例",
-    media: "媒体审计", messages: "消息", tasks: "死信任务", settings: "平台设置",
+    media: "媒体审计", messages: "消息", tasks: "死信任务", audit: "审计日志", settings: "平台设置",
+    "me-settings": "我的设置",
   };
   function switchView(name) {
     document.querySelectorAll(".nav-item").forEach((b) =>
@@ -59,7 +60,9 @@
     if (name === "media") loadMedia();
     if (name === "messages") loadMessages();
     if (name === "tasks") loadTasks();
+    if (name === "audit") loadAuditLogs();
     if (name === "settings") loadSettings();
+    if (name === "me-settings") loadMySettings();
   }
 
   /* ---------- 登录 / 退出 ---------- */
@@ -532,6 +535,24 @@
     }
   }
 
+  /* ---------- 审计日志 ---------- */
+  async function loadAuditLogs() {
+    try {
+      const rows = await api("/api/admin/audit-logs?limit=200");
+      $("audit-tbody").innerHTML = rows.length
+        ? rows.map((r) => `
+            <tr>
+              <td class="mono small">${esc((r.created_at || "").replace("T", " ").slice(0, 19))}</td>
+              <td class="mono small">${esc((r.user_id || "").slice(0, 8) || "—")}</td>
+              <td><span class="badge">${esc(r.action)}</span></td>
+              <td class="small muted">${esc(JSON.stringify(r.detail || {}))}</td>
+            </tr>`).join("")
+        : '<tr><td colspan="4" class="muted">暂无审计记录</td></tr>';
+    } catch (ex) {
+      toast(ex.message, true);
+    }
+  }
+
   /* ---------- 平台设置 ---------- */
   const SETTING_GROUPS = {
     general: "基础与公告", model: "模型与供应商", account: "用户与账号",
@@ -622,6 +643,11 @@
       toast("没有可保存的设置", true);
       return;
     }
+    const purgeKeys = ["message_retention_days", "dead_task_retention_days", "audit_retention_days"];
+    if (purgeKeys.some((k) => values[k] > 0)
+        && !window.confirm("数据保留天数非零后将定期删除超过期限的旧消息/死信/审计记录，确认保存？")) {
+      return;
+    }
     try {
       await api("/api/admin/settings", {
         method: "PUT",
@@ -634,6 +660,213 @@
       toast(ex.message, true);
     }
   }
+
+  /* ---------- 我的设置（用户自助中心） ---------- */
+  let myCards = [], myPresets = [], myMemories = [], myProviders = [], mySessions = [];
+  let editingCardId = null;
+
+  function escHtml(v) {
+    return esc(v == null ? "" : String(v));
+  }
+
+  async function loadMySettings() {
+    try {
+      const [cards, presets, memories, providers, sessions, usage] = await Promise.all([
+        api("/api/me/cards"), api("/api/me/presets"), api("/api/me/memories"),
+        api("/api/me/providers"), api("/api/me/sessions"), api("/api/me/usage?days=7"),
+      ]);
+      myCards = cards; myPresets = presets; myMemories = memories;
+      myProviders = providers; mySessions = sessions;
+      renderMyCards(); renderMyPresets(); renderMyMemories(); renderMyProviders();
+      renderMySessions(); renderMyUsage(usage);
+    } catch (ex) { toast(ex.message, true); }
+  }
+
+  function renderMyCards() {
+    $("me-card-tbody").innerHTML = myCards.length
+      ? myCards.map((c) => `
+          <tr>
+            <td>${escHtml(c.name)}</td>
+            <td class="muted small">${escHtml(c.format)}</td>
+            <td>${c.active ? '<span class="badge">激活中</span>' : ""}</td>
+            <td class="me-actions">
+              <button class="btn btn-sm" data-card-edit="${c.id}">编辑</button>
+              ${c.active ? "" : `<button class="btn btn-sm" data-card-activate="${c.id}">激活</button>`}
+              <button class="btn btn-sm btn-danger" data-card-delete="${c.id}">删除</button>
+            </td>
+          </tr>`).join("")
+      : '<tr><td colspan="4" class="muted">还没有角色卡</td></tr>';
+    bindCardActions();
+  }
+
+  function bindCardActions() {
+    document.querySelectorAll("[data-card-edit]").forEach((b) =>
+      b.addEventListener("click", async () => {
+        editingCardId = b.dataset.cardEdit;
+        const card = await api(`/api/me/cards/${editingCardId}`);
+        $("me-card-content").value = card.content || "";
+        $("me-card-editor").classList.remove("hidden");
+      }));
+    document.querySelectorAll("[data-card-activate]").forEach((b) =>
+      b.addEventListener("click", async () => {
+        await api(`/api/me/cards/${b.dataset.cardActivate}/activate`, { method: "POST" });
+        toast("已激活"); loadMySettings();
+      }));
+    document.querySelectorAll("[data-card-delete]").forEach((b) =>
+      b.addEventListener("click", async () => {
+        await api(`/api/me/cards/${b.dataset.cardDelete}`, { method: "DELETE" });
+        toast("已删除"); loadMySettings();
+      }));
+  }
+
+  function renderMyPresets() {
+    $("me-preset-tbody").innerHTML = myPresets.length
+      ? myPresets.map((p) => `
+          <tr>
+            <td>${escHtml(p.name)}</td>
+            <td class="me-actions">
+              <button class="btn btn-sm" data-preset-apply="${p.id}">应用</button>
+              <button class="btn btn-sm btn-danger" data-preset-delete="${p.id}">删除</button>
+            </td>
+          </tr>`).join("")
+      : '<tr><td colspan="2" class="muted">还没有预设</td></tr>';
+    document.querySelectorAll("[data-preset-apply]").forEach((b) =>
+      b.addEventListener("click", async () => {
+        await api(`/api/me/presets/${b.dataset.presetApply}/apply`, { method: "POST" });
+        toast("预设已应用"); loadMySettings();
+      }));
+    document.querySelectorAll("[data-preset-delete]").forEach((b) =>
+      b.addEventListener("click", async () => {
+        await api(`/api/me/presets/${b.dataset.presetDelete}`, { method: "DELETE" });
+        toast("已删除"); loadMySettings();
+      }));
+  }
+
+  function renderMyMemories() {
+    $("me-memory-tbody").innerHTML = myMemories.length
+      ? myMemories.map((m) => `
+          <tr>
+            <td>${escHtml(m.content)}</td>
+            <td class="mono small muted">${escHtml((m.created_at || "").replace("T", " ").slice(0, 16))}</td>
+            <td><button class="btn btn-sm btn-danger" data-memory-delete="${m.id}">删除</button></td>
+          </tr>`).join("")
+      : '<tr><td colspan="3" class="muted">记忆为空</td></tr>';
+    document.querySelectorAll("[data-memory-delete]").forEach((b) =>
+      b.addEventListener("click", async () => {
+        await api(`/api/me/memories/${b.dataset.memoryDelete}`, { method: "DELETE" });
+        toast("已删除"); loadMySettings();
+      }));
+  }
+
+  function renderMyProviders() {
+    $("me-provider-tbody").innerHTML = myProviders.length
+      ? myProviders.map((p) => `
+          <tr>
+            <td>${escHtml(p.provider_key)}</td>
+            <td class="small">${escHtml(p.base_url)}</td>
+            <td class="small muted">${escHtml((p.models || []).join(", "))}</td>
+            <td><button class="btn btn-sm btn-danger" data-provider-delete="${p.id}">删除</button></td>
+          </tr>`).join("")
+      : '<tr><td colspan="4" class="muted">暂无自带供应商</td></tr>';
+    document.querySelectorAll("[data-provider-delete]").forEach((b) =>
+      b.addEventListener("click", async () => {
+        await api(`/api/me/providers/${b.dataset.providerDelete}`, { method: "DELETE" });
+        toast("已删除"); loadMySettings();
+      }));
+  }
+
+  function renderMySessions() {
+    $("me-session-tbody").innerHTML = mySessions.length
+      ? mySessions.map((s) => `
+          <tr>
+            <td class="mono small">${escHtml(s.id.slice(0, 8))}</td>
+            <td>${escHtml(s.role)}</td>
+            <td class="mono small muted">${escHtml((s.expires_at || "").replace("T", " ").slice(0, 16))}</td>
+          </tr>`).join("")
+      : '<tr><td colspan="3" class="muted">无会话</td></tr>';
+  }
+
+  function renderMyUsage(usage) {
+    const max = Math.max(1, ...usage.map((d) => d.tokens));
+    $("me-usage").innerHTML = usage.length
+      ? `<div class="trend">${usage.map((d) => `
+          <div class="trend-col">
+            <div class="trend-val">${d.tokens >= 1000 ? (d.tokens / 1000).toFixed(1) + "k" : d.tokens}</div>
+            <div class="trend-bar${d.tokens ? "" : " zero"}" style="height:${Math.max(2, Math.round((d.tokens / max) * 100))}%"></div>
+            <div class="trend-label">${escHtml(d.date.slice(5))}</div>
+          </div>`).join("")}</div>`
+      : '<p class="muted">暂无用量数据</p>';
+  }
+
+  function bindMySettings() {
+    $("me-card-new").addEventListener("click", async () => {
+      const name = $("me-card-name").value.trim();
+      if (!name) return toast("请填写卡片名称", true);
+      await api("/api/me/cards", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name, content: "" }) });
+      toast("已创建"); loadMySettings();
+    });
+    $("me-card-import").addEventListener("click", () => $("me-card-png").click());
+    $("me-card-png").addEventListener("change", async () => {
+      const file = $("me-card-png").files[0];
+      const name = $("me-card-name").value.trim() || file.name.replace(/\.png$/i, "");
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = async () => {
+        const base64 = reader.result.split(",")[1];
+        await api("/api/me/cards/import", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name, png_base64: base64 }) });
+        toast("导入成功"); loadMySettings();
+      };
+      reader.readAsDataURL(file);
+    });
+    $("me-card-save").addEventListener("click", async () => {
+      if (!editingCardId) return;
+      await api(`/api/me/cards/${editingCardId}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ content: $("me-card-content").value }) });
+      toast("已保存"); $("me-card-editor").classList.add("hidden"); loadMySettings();
+    });
+    $("me-card-close").addEventListener("click", () => $("me-card-editor").classList.add("hidden"));
+    $("me-preset-save").addEventListener("click", async () => {
+      const name = $("me-preset-name").value.trim();
+      if (!name) return toast("请填写预设名称", true);
+      await api("/api/me/presets", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name }) });
+      toast("已保存"); loadMySettings();
+    });
+    $("me-memory-add").addEventListener("click", async () => {
+      const content = $("me-memory-input").value.trim();
+      if (!content) return toast("请输入记忆内容", true);
+      await api("/api/me/memories", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ content }) });
+      $("me-memory-input").value = ""; toast("已保存"); loadMySettings();
+    });
+    $("me-memory-clear").addEventListener("click", async () => {
+      if (!window.confirm("确认清空全部长期记忆？")) return;
+      await api("/api/me/memories/clear", { method: "POST" });
+      toast("已清空"); loadMySettings();
+    });
+    $("me-provider-add").addEventListener("click", async () => {
+      const body = {
+        provider_key: $("me-provider-key").value.trim(),
+        base_url: $("me-provider-url").value.trim(),
+        api_key: $("me-provider-apikey").value,
+      };
+      if (!body.provider_key || !body.base_url || !body.api_key) return toast("请填写完整供应商信息", true);
+      await api("/api/me/providers", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      $("me-provider-apikey").value = ""; toast("已添加"); loadMySettings();
+    });
+    $("me-password-save").addEventListener("click", async () => {
+      const oldPassword = $("me-old-password").value;
+      const newPassword = $("me-new-password").value;
+      if (!oldPassword || !newPassword) return toast("请填写原密码与新密码", true);
+      await api("/api/me/password", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ old_password: oldPassword, new_password: newPassword }) });
+      $("me-old-password").value = ""; $("me-new-password").value = "";
+      toast("密码已修改，其他设备已退出"); loadMySettings();
+    });
+    $("me-revoke-all").addEventListener("click", async () => {
+      if (!window.confirm("确认退出其他所有设备的登录？")) return;
+      await api("/api/me/sessions/revoke-all", { method: "POST" });
+      toast("其他设备已退出"); loadMySettings();
+    });
+  }
+
+  bindMySettings();
 
   /* ---------- 启动 ---------- */
   fetch("/api/auth/config")

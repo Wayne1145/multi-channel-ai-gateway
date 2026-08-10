@@ -109,6 +109,38 @@ def record_login_failure(username: str) -> None:
         log.warning("记录登录失败计数失败 username=%s", username)
 
 
+def _ip_lock_key(ip: str) -> str:
+    return f"login:ip:{ip}"
+
+
+def is_ip_locked(ip: str) -> bool:
+    """同 IP 总尝试数超限即拒绝；Redis 故障时 fail-open。"""
+    try:
+        redis = redis_client()
+        attempts = int(redis.get(_ip_lock_key(ip)) or 0)
+        max_attempts = int(get_runtime_value(SessionLocal(), "login_ip_max_attempts"))
+        return attempts >= max_attempts
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def record_ip_attempt(ip: str) -> None:
+    try:
+        redis = redis_client()
+        redis.incr(_ip_lock_key(ip))
+        window = int(get_runtime_value(SessionLocal(), "login_ip_window_seconds"))
+        redis.expire(_ip_lock_key(ip), window)
+    except Exception:  # noqa: BLE001 - IP 计数丢失不影响正确性
+        log.warning("记录 IP 登录尝试失败 ip=%s", ip)
+
+
+def clear_ip_attempts(ip: str) -> None:
+    try:
+        redis_client().delete(_ip_lock_key(ip))
+    except Exception:  # noqa: BLE001
+        log.debug("清除 IP 登录计数失败 ip=%s", ip)
+
+
 def clear_login_failures(username: str) -> None:
     try:
         redis_client().delete(_login_lock_key(username))

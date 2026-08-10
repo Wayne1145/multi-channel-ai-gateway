@@ -38,3 +38,20 @@ def test_settings_view_navigation_and_save_wiring():
     assert "announcement" in js
     # 媒体大小上限界面按 MB 显示，保存时必须换算回字节，否则会把 20MB 存成 20 字节
     assert 's.key === "media_max_size_bytes" ? n * 1024 * 1024 : n' in js
+    # 数据保留非零时保存前二次确认
+    assert 'window.confirm(' in js
+    assert "message_retention_days" in js
+    # 审计日志页面
+    assert 'data-view="audit"' in html
+    assert 'id="view-audit"' in html
+    assert 'id="audit-tbody"' in html
+    assert '"/api/admin/audit-logs' in js
+    # 我的设置（用户自助中心）
+    assert 'data-view="me-settings"' in html
+    assert 'id="view-me-settings"' in html
+    assert 'id="me-card-tbody"' in html
+    assert 'id="me-provider-tbody"' in html
+    assert '"/api/me/cards' in js
+    assert '"/api/me/password' in js
+    assert '"/api/me/sessions/revoke-all' in js
+    assert '"/api/me/usage' in js

@@ -450,3 +450,14 @@ select.field { cursor: pointer; }
 .quota-fill { height: 100%; border-radius: 999px; background: var(--accent, #4f8cff); transition: width .4s; }
 .quota-fill.warn { background: var(--danger, #ff4d6d); }
 .text-danger { color: var(--danger, #ff4d6d); }
+
+
+/* ---------- 我的设置 ---------- */
+.me-section { border-top: 1px solid rgba(128,128,128,.12); padding: 14px 0; }
+.me-section h3 { margin: 0 0 10px; font-size: 14px; color: var(--muted, #888); }
+.me-toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; flex-wrap: wrap; }
+.me-editor { margin-top: 10px; display: flex; flex-direction: column; gap: 8px; }
+.me-actions { display: flex; gap: 6px; }
+.me-actions .btn { padding: 3px 10px; font-size: 12px; }
+.btn-danger { background: rgba(255,77,109,.12); color: var(--danger, #ff4d6d); }
+.me-usage .trend { display: flex; gap: 8px; align-items: flex-end; height: 140px; }

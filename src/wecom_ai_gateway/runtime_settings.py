@@ -20,7 +20,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .config import settings
-from .models import PlatformConfig
+from .models import PlatformConfig, SettingOverride
 
 
 @dataclass(frozen=True)
@@ -49,7 +49,10 @@ SPECS: list[SettingSpec] = [
     SettingSpec("announcement", "general", "系统公告", "str", default="", max=2000,
                 description="显示在登录页与用户面板的公告；留空表示不展示。"),
     SettingSpec("maintenance_mode", "general", "维护模式", "bool", default=False,
-                description="开启后普通用户的新消息不进入 AI 处理；管理员后台不受影响。"),
+                description="开启后普通用户的新消息不进入 AI 处理，改为回复维护提示；管理员后台不受影响。"),
+    SettingSpec("maintenance_message", "general", "维护提示文案", "str",
+                default="系统维护中，请稍后再试。", max=500,
+                description="维护模式下回复给普通用户新消息的提示文案。"),
     # ---------- 2. 模型与供应商 ----------
     SettingSpec("default_provider", "model", "默认供应商", "str", env_attr="default_provider",
                 max=80, description="未配置 BYOK 用户使用的供应商标识。"),
@@ -91,6 +94,12 @@ SPECS: list[SettingSpec] = [
                 unit="次", description="连续失败达到该次数后临时锁定；Redis 不可用时跳过锁定。"),
     SettingSpec("login_lock_minutes", "account", "登录锁定时长（分钟）", "int", default=15, min=1, max=1440,
                 unit="分钟", description="超过阈值后禁止登录的分钟数。"),
+    SettingSpec("login_ip_max_attempts", "account", "同 IP 登录尝试上限", "int", default=60,
+                min=10, max=1000, unit="次",
+                description="同一 IP 在窗口期内的总登录尝试上限；管理员登录不计入。"),
+    SettingSpec("login_ip_window_seconds", "account", "IP 限流窗口（秒）", "int", default=900,
+                min=60, max=86400, unit="秒",
+                description="IP 计数窗口长度，窗口结束后自动重置。"),
     # ---------- 4. 用量与限额 ----------
     SettingSpec("daily_quota_enabled", "quota", "启用每日用量配额", "bool", default=True,
                 description="关闭后所有用户不受每日 Token 配额限制。"),
@@ -172,6 +181,14 @@ SPECS: list[SettingSpec] = [
 
 SPEC_BY_KEY: dict[str, SettingSpec] = {spec.key: spec for spec in SPECS}
 
+# 允许渠道/用户级覆盖的键及其作用域。
+# 刻意只开放少量键：覆盖会改变单个用户/渠道的行为，默认保守。
+OVERRIDABLE_KEYS: dict[str, set[str]] = {
+    "user_daily_token_quota": {"user"},
+    "max_context_messages": {"user", "channel"},
+    "message_max_chars": {"channel"},
+}
+
 
 def _coerce(raw: Any, spec: SettingSpec) -> Any:
     if spec.type == "bool":
@@ -210,19 +227,120 @@ def _coerce(raw: Any, spec: SettingSpec) -> Any:
     return raw
 
 
+_CACHE_KEY = "_runtime_settings_cache"
+
+
+def _cache_clear(db: Session) -> None:
+    db.info.pop(_CACHE_KEY, None)
+
+
 def get_runtime_value(db: Session, key: str) -> Any:
-    """读取设置：DB 已校验值 > .env（settings 单例）> spec 默认。"""
+    """读取设置：DB 已校验值 > .env（settings 单例）> spec 默认。
+
+    同一 session 内按 key 缓存，避免单条消息处理链路反复查库；
+    写入路径（update_settings / 覆盖）会主动清空该缓存。
+    """
+    cache = db.info.get(_CACHE_KEY)
+    if cache is not None and key in cache:
+        return cache[key]
     spec = SPEC_BY_KEY[key]
     row = db.get(PlatformConfig, _db_key(spec))
+    value: Any = spec.default
     if row is not None:
         try:
-            return _coerce(_from_stored(spec, row.value), spec)
+            value = _coerce(_from_stored(spec, row.value), spec)
         except ValueError:
             # 库里出现非法值（旧数据/手工修改）时回退默认，避免拖垮运行
             pass
-    if spec.env_attr and hasattr(settings, spec.env_attr):
-        return getattr(settings, spec.env_attr)
-    return spec.default
+    elif spec.env_attr and hasattr(settings, spec.env_attr):
+        value = getattr(settings, spec.env_attr)
+    if cache is None:
+        cache = db.info[_CACHE_KEY] = {}
+    cache[key] = value
+    return value
+
+
+def get_effective_value(
+    db: Session,
+    key: str,
+    *,
+    user_id: str | None = None,
+    channel: str | None = None,
+) -> Any:
+    """按 用户 > 渠道 > 平台配置 > .env 的优先级解析设置。"""
+    spec = SPEC_BY_KEY[key]
+    for scope_type, scope_id in (("user", user_id), ("channel", channel)):
+        if not scope_id:
+            continue
+        row = db.scalar(
+            select(SettingOverride).where(
+                SettingOverride.scope_type == scope_type,
+                SettingOverride.scope_id == scope_id,
+                SettingOverride.key == key,
+            )
+        )
+        if row is not None:
+            try:
+                return _coerce(row.value, spec)
+            except ValueError:
+                continue
+    return get_runtime_value(db, key)
+
+
+def set_override(
+    db: Session,
+    scope_type: str,
+    scope_id: str,
+    key: str,
+    value: Any,
+) -> SettingOverride:
+    """写入渠道/用户级覆盖；校验键可覆盖性与类型/上下限。"""
+    allowed = OVERRIDABLE_KEYS.get(key)
+    if not allowed:
+        raise ValueError("该设置不支持覆盖")
+    if scope_type not in allowed:
+        raise ValueError(f"该设置不支持 {scope_type} 级覆盖")
+    spec = SPEC_BY_KEY[key]
+    coerced = _coerce(value, spec)
+    row = db.scalar(
+        select(SettingOverride).where(
+            SettingOverride.scope_type == scope_type,
+            SettingOverride.scope_id == scope_id,
+            SettingOverride.key == key,
+        )
+    )
+    if row:
+        row.value = coerced
+    else:
+        row = SettingOverride(
+            scope_type=scope_type, scope_id=scope_id, key=key, value=coerced
+        )
+        db.add(row)
+    _cache_clear(db)
+    db.commit()
+    return row
+
+
+def remove_override(db: Session, scope_type: str, scope_id: str, key: str) -> None:
+    db.execute(
+        SettingOverride.__table__.delete().where(
+            SettingOverride.scope_type == scope_type,
+            SettingOverride.scope_id == scope_id,
+            SettingOverride.key == key,
+        )
+    )
+    _cache_clear(db)
+    db.commit()
+
+
+def list_overrides(db: Session) -> list[SettingOverride]:
+    return list(
+        db.scalars(
+            select(SettingOverride).order_by(
+                SettingOverride.scope_type, SettingOverride.scope_id, SettingOverride.key
+            )
+        )
+    )
 
 
 def _db_key(spec: SettingSpec) -> str:
@@ -268,6 +386,7 @@ def update_settings(db: Session, values: dict[str, Any]) -> dict[str, str]:
             row.value = _to_stored(spec, value)
         else:
             db.add(PlatformConfig(key=db_key, value=_to_stored(spec, value)))
+    _cache_clear(db)
     db.commit()
     return {}
 
@@ -277,6 +396,7 @@ def settings_view(db: Session) -> list[dict]:
     rows = {row.key: row.value for row in db.scalars(select(PlatformConfig))}
     view: list[dict] = []
     for spec in SPECS:
+        overridable = OVERRIDABLE_KEYS.get(spec.key)
         if spec.secret:
             configured = bool(getattr(settings, spec.env_attr, "") if spec.env_attr else "")
             value: Any = {"configured": configured}
@@ -304,5 +424,7 @@ def settings_view(db: Session) -> list[dict]:
             "description": spec.description,
             "unit": spec.unit,
         }
+        if overridable:
+            item["overridable"] = sorted(overridable)
         view.append(item)
     return view

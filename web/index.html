@@ -53,6 +53,14 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4M5 5l2.5 2.5M16.5 16.5 19 19M19 5l-2.5 2.5M7.5 16.5 5 19"/></svg>
         死信任务
       </button>
+      <button class="nav-item" data-view="me-settings">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="3.6"/><path d="M5 20c.7-3.8 3.3-5.6 7-5.6s6.3 1.8 7 5.6"/></svg>
+        我的设置
+      </button>
+      <button class="nav-item admin-only" data-view="audit">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M8 13h8M8 17h5"/></svg>
+        审计日志
+      </button>
       <button class="nav-item admin-only" data-view="settings">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1.03 1.56V21a2 2 0 1 1-4 0v-.09a1.7 1.7 0 0 0-1.03-1.56 1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.7 1.7 0 0 0 .34-1.87 1.7 1.7 0 0 0-1.56-1.03H3a2 2 0 1 1 0-4h.09a1.7 1.7 0 0 0 1.56-1.03 1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.87.34h.09a1.7 1.7 0 0 0 1.03-1.56V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1.03 1.56 1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.87v.09a1.7 1.7 0 0 0 1.56 1.03H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.56 1.03z"/></svg>
         平台设置
@@ -194,6 +202,94 @@
           <table class="table">
             <thead><tr><th>类型</th><th>尝试次数</th><th>错误</th><th>更新时间</th><th></th></tr></thead>
             <tbody id="task-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+    <section id="view-me-settings" class="view hidden">
+      <div class="card">
+        <div class="card-head"><h2>我的设置</h2></div>
+        <div class="me-section">
+          <h3>角色卡</h3>
+          <div class="me-toolbar">
+            <input id="me-card-name" class="field" placeholder="卡片名称" style="width:160px">
+            <button id="me-card-new" class="btn btn-sm">新建</button>
+            <input type="file" id="me-card-png" accept="image/png" style="display:none">
+            <button id="me-card-import" class="btn btn-sm">导入 PNG</button>
+          </div>
+          <table class="table">
+            <thead><tr><th>名称</th><th>格式</th><th>状态</th><th>操作</th></tr></thead>
+            <tbody id="me-card-tbody"></tbody>
+          </table>
+          <div class="me-editor hidden" id="me-card-editor">
+            <textarea id="me-card-content" class="field" rows="6" style="width:100%"></textarea>
+            <button id="me-card-save" class="btn btn-sm btn-primary">保存内容</button>
+            <button id="me-card-close" class="btn btn-sm">关闭</button>
+          </div>
+        </div>
+        <div class="me-section">
+          <h3>预设</h3>
+          <div class="me-toolbar">
+            <input id="me-preset-name" class="field" placeholder="预设名称" style="width:160px">
+            <button id="me-preset-save" class="btn btn-sm">保存当前配置</button>
+          </div>
+          <table class="table">
+            <thead><tr><th>名称</th><th>操作</th></tr></thead>
+            <tbody id="me-preset-tbody"></tbody>
+          </table>
+        </div>
+        <div class="me-section">
+          <h3>长期记忆</h3>
+          <div class="me-toolbar">
+            <input id="me-memory-input" class="field" placeholder="新记忆内容" style="flex:1">
+            <button id="me-memory-add" class="btn btn-sm">添加</button>
+            <button id="me-memory-clear" class="btn btn-sm btn-danger">清空</button>
+          </div>
+          <table class="table">
+            <thead><tr><th>内容</th><th>时间</th><th></th></tr></thead>
+            <tbody id="me-memory-tbody"></tbody>
+          </table>
+        </div>
+        <div class="me-section">
+          <h3>自带供应商（BYOK）</h3>
+          <div class="me-toolbar">
+            <input id="me-provider-key" class="field" placeholder="provider_key" style="width:140px">
+            <input id="me-provider-url" class="field" placeholder="https://base.url/v1" style="width:220px">
+            <input id="me-provider-apikey" type="password" class="field" placeholder="API Key" style="width:200px">
+            <button id="me-provider-add" class="btn btn-sm">添加</button>
+          </div>
+          <table class="table">
+            <thead><tr><th>类型</th><th>Base URL</th><th>模型</th><th></th></tr></thead>
+            <tbody id="me-provider-tbody"></tbody>
+          </table>
+          <p class="muted small">密钥加密存储，保存后不可回显。</p>
+        </div>
+        <div class="me-section">
+          <h3>账号安全</h3>
+          <div class="me-toolbar">
+            <input id="me-old-password" type="password" class="field" placeholder="原密码" style="width:160px">
+            <input id="me-new-password" type="password" class="field" placeholder="新密码" style="width:160px">
+            <button id="me-password-save" class="btn btn-sm btn-primary">修改密码</button>
+            <button id="me-revoke-all" class="btn btn-sm btn-danger">退出其他设备</button>
+          </div>
+          <table class="table">
+            <thead><tr><th>会话</th><th>角色</th><th>过期时间</th></tr></thead>
+            <tbody id="me-session-tbody"></tbody>
+          </table>
+        </div>
+        <div class="me-section">
+          <h3>用量（近 7 天）</h3>
+          <div id="me-usage" class="me-usage"></div>
+        </div>
+      </div>
+    </section>
+    <section id="view-audit" class="view hidden">
+      <div class="card">
+        <div class="card-head"><h2>审计日志</h2></div>
+        <div class="table-wrap">
+          <table class="table">
+            <thead><tr><th>时间</th><th>管理员</th><th>动作</th><th>详情</th></tr></thead>
+            <tbody id="audit-tbody"></tbody>
           </table>
         </div>
       </div>

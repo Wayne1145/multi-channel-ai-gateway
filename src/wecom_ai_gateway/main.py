@@ -14,20 +14,30 @@ from qrcode.image.svg import SvgPathImage
 from sqlalchemy import delete, func, or_, select
 from sqlalchemy.orm import Session
 
+from . import presets as preset_service
 from .auth import (
     Principal,
+    clear_ip_attempts,
     clear_login_failures,
     create_session,
+    is_ip_locked,
     is_login_locked,
     login,
     normalize_username,
     principal_from_bearer,
+    record_ip_attempt,
     record_login_failure,
     revoke_session,
 )
-from .cards import detect_format, encrypt_card_content, extract_card_from_png
+from .cards import (
+    decrypt_card_content,
+    detect_format,
+    encrypt_card_content,
+    extract_card_from_png,
+)
 from .channels import ChannelMessage, registry
 from .clawbot import register_clawbot_adapter
+from .commands import memory_text
 from .config import settings
 from .db import SessionLocal, session_scope
 from .media import list_media_metadata
@@ -48,6 +58,7 @@ from .models import (
     OutboxTask,
     PlatformConfig,
     Preset,
+    SettingOverride,
     UsageRecord,
     User,
     UserProvider,
@@ -56,7 +67,13 @@ from .models import (
 from .policy import resolve_user_mode
 from .queueing import enqueue_sync
 from .redaction import redact_error
-from .runtime_settings import get_runtime_value, settings_view, update_settings
+from .runtime_settings import (
+    get_runtime_value,
+    list_overrides,
+    set_override,
+    settings_view,
+    update_settings,
+)
 from .security import hash_password, verify_admin_token
 from .services import ingest_channel_message, quota_status
 from .tasks import replay_task
@@ -163,8 +180,14 @@ def auth_config(db: Session = Depends(db_dep)):
 
 
 @app.post("/api/auth/login")
-def auth_login(body: LoginIn, db: Session = Depends(db_dep)):
+def auth_login(body: LoginIn, request: Request, db: Session = Depends(db_dep)):
     normalized = normalize_username(body.username)
+    is_admin_login = normalized == settings.admin_username.strip().lower()
+    client_ip = request.client.host if request.client else ""
+    if client_ip and not is_admin_login:
+        if is_ip_locked(client_ip):
+            raise HTTPException(429, "登录尝试过于频繁，请稍后再试")
+        record_ip_attempt(client_ip)
     if is_login_locked(normalized):
         raise HTTPException(429, "登录失败次数过多，请稍后再试")
     try:
@@ -175,6 +198,8 @@ def auth_login(body: LoginIn, db: Session = Depends(db_dep)):
         record_login_failure(normalized)
         raise HTTPException(401, "账号或密码错误")
     clear_login_failures(normalized)
+    if client_ip:
+        clear_ip_attempts(client_ip)
     token, principal = result
     return {
         "token": token,
@@ -288,6 +313,619 @@ def admin_update_settings(body: SettingsUpdateIn, db: Session = Depends(db_dep))
     db.add(AuditLog(action="settings.update", detail={"count": len(body.values)}))
     db.commit()
     return {"ok": True}
+
+
+class SettingOverrideIn(BaseModel):
+    scope_type: str  # user | channel
+    scope_id: str
+    key: str
+    value: object
+
+
+@app.get("/api/admin/settings/overrides", dependencies=[Depends(admin)])
+def admin_setting_overrides(db: Session = Depends(db_dep)):
+    return {
+        "overrides": [
+            {
+                "id": row.id,
+                "scope_type": row.scope_type,
+                "scope_id": row.scope_id,
+                "key": row.key,
+                "value": row.value,
+                "updated_at": row.updated_at,
+            }
+            for row in list_overrides(db)
+        ]
+    }
+
+
+@app.put("/api/admin/settings/overrides", dependencies=[Depends(admin)])
+def admin_set_setting_override(body: SettingOverrideIn, db: Session = Depends(db_dep)):
+    try:
+        row = set_override(db, body.scope_type, body.scope_id, body.key, body.value)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    db.add(
+        AuditLog(
+            action="settings.override",
+            detail={"scope_type": body.scope_type, "scope_id": body.scope_id, "key": body.key},
+        )
+    )
+    db.commit()
+    return {"ok": True, "id": row.id}
+
+
+@app.delete("/api/admin/settings/overrides/{override_id}", dependencies=[Depends(admin)])
+def admin_delete_setting_override(override_id: str, db: Session = Depends(db_dep)):
+    row = db.get(SettingOverride, override_id)
+    if not row:
+        raise HTTPException(404, "override not found")
+    db.delete(row)
+    db.add(
+        AuditLog(
+            action="settings.override_remove",
+            detail={"scope_type": row.scope_type, "scope_id": row.scope_id, "key": row.key},
+        )
+    )
+    db.commit()
+    return {"ok": True}
+
+
+@app.get("/api/admin/audit-logs", dependencies=[Depends(admin)])
+def admin_audit_logs(
+    db: Session = Depends(db_dep),
+    limit: int = 100,
+    action: str = "",
+    user_id: str = "",
+):
+    query = select(AuditLog)
+    if action:
+        query = query.where(AuditLog.action.contains(action))
+    if user_id:
+        query = query.where(AuditLog.user_id == user_id)
+    rows = db.scalars(
+        query.order_by(AuditLog.created_at.desc()).limit(min(limit, 500))
+    )
+    return [
+        {
+            "id": row.id,
+            "user_id": row.user_id,
+            "action": row.action,
+            "detail": row.detail,
+            "created_at": row.created_at,
+        }
+        for row in rows
+    ]
+
+
+# ================= 用户自助中心（/api/me/*） =================
+
+class CardCreateIn(BaseModel):
+    name: str
+    content: str = ""
+
+
+class CardUpdateIn(BaseModel):
+    content: str
+
+
+class CardImportIn(BaseModel):
+    name: str
+    png_base64: str
+
+
+class PresetSaveIn(BaseModel):
+    name: str
+
+
+class MemoryAddIn(BaseModel):
+    content: str
+
+
+class ProviderIn(BaseModel):
+    provider_key: str
+    base_url: str
+    api_key: str
+    models: list[str] = []
+
+
+class ProviderUpdateIn(BaseModel):
+    provider_key: str | None = None
+    base_url: str | None = None
+    api_key: str | None = None
+    models: list[str] | None = None
+
+
+class PasswordChangeIn(BaseModel):
+    old_password: str
+    new_password: str
+
+
+def _card_meta(card: CharacterCard) -> dict:
+    return {
+        "id": card.id,
+        "name": card.name,
+        "format": card.format,
+        "active": card.active,
+        "created_at": card.created_at,
+        "updated_at": card.updated_at,
+    }
+
+
+def _user_settings_for(db: Session, user_id: str) -> UserSettings:
+    row = db.get(UserSettings, user_id)
+    if not row:
+        row = UserSettings(user_id=user_id)
+        db.add(row)
+        db.flush()
+    return row
+
+
+@app.get("/api/me/cards")
+def my_cards(principal: Principal = Depends(current_user), db: Session = Depends(db_dep)):
+    assert principal.user_id is not None
+    rows = db.scalars(
+        select(CharacterCard)
+        .where(CharacterCard.user_id == principal.user_id)
+        .order_by(CharacterCard.created_at)
+    )
+    return [_card_meta(row) for row in rows]
+
+
+@app.get("/api/me/cards/{card_id}")
+def my_card_detail(
+    card_id: str,
+    principal: Principal = Depends(current_user),
+    db: Session = Depends(db_dep),
+):
+    assert principal.user_id is not None
+    card = db.scalar(
+        select(CharacterCard).where(
+            CharacterCard.id == card_id, CharacterCard.user_id == principal.user_id
+        )
+    )
+    if not card:
+        raise HTTPException(404, "card not found")
+    content = ""
+    if card.content_encrypted:
+        try:
+            content = decrypt_card_content(card.content_encrypted)
+        except Exception:  # noqa: BLE001
+            content = ""
+    return {**_card_meta(card), "content": content}
+
+
+@app.post("/api/me/cards")
+def my_card_create(
+    body: CardCreateIn,
+    principal: Principal = Depends(current_user),
+    db: Session = Depends(db_dep),
+):
+    assert principal.user_id is not None
+    name = body.name.strip()[:120]
+    if not name:
+        raise HTTPException(400, "name is required")
+    limit = int(get_runtime_value(db, "max_cards_per_user"))
+    count = db.scalar(
+        select(func.count()).select_from(CharacterCard).where(
+            CharacterCard.user_id == principal.user_id
+        )
+    )
+    if count >= limit:
+        raise HTTPException(400, f"角色卡数量已达上限（{limit} 张）")
+    fmt = detect_format(body.content) if body.content else "soul_md"
+    content_encrypted = encrypt_card_content(body.content[: int(get_runtime_value(db, "card_max_chars"))]) if body.content else None
+    card = CharacterCard(
+        user_id=principal.user_id,
+        name=name,
+        format=fmt,
+        content_encrypted=content_encrypted,
+        active=False,
+    )
+    db.add(card)
+    db.commit()
+    return _card_meta(card)
+
+
+@app.put("/api/me/cards/{card_id}")
+def my_card_update(
+    card_id: str,
+    body: CardUpdateIn,
+    principal: Principal = Depends(current_user),
+    db: Session = Depends(db_dep),
+):
+    assert principal.user_id is not None
+    card = db.scalar(
+        select(CharacterCard).where(
+            CharacterCard.id == card_id, CharacterCard.user_id == principal.user_id
+        )
+    )
+    if not card:
+        raise HTTPException(404, "card not found")
+    card.content_encrypted = encrypt_card_content(
+        body.content[: int(get_runtime_value(db, "card_max_chars"))]
+    )
+    card.format = detect_format(body.content)
+    db.commit()
+    return _card_meta(card)
+
+
+@app.post("/api/me/cards/{card_id}/activate")
+def my_card_activate(
+    card_id: str,
+    principal: Principal = Depends(current_user),
+    db: Session = Depends(db_dep),
+):
+    assert principal.user_id is not None
+    card = db.scalar(
+        select(CharacterCard).where(
+            CharacterCard.id == card_id, CharacterCard.user_id == principal.user_id
+        )
+    )
+    if not card:
+        raise HTTPException(404, "card not found")
+    db.execute(
+        CharacterCard.__table__.update()
+        .where(CharacterCard.user_id == principal.user_id, CharacterCard.active.is_(True))
+        .values(active=False)
+    )
+    card.active = True
+    _user_settings_for(db, principal.user_id).active_card_id = card.id
+    db.commit()
+    return {"ok": True}
+
+
+@app.delete("/api/me/cards/{card_id}")
+def my_card_delete(
+    card_id: str,
+    principal: Principal = Depends(current_user),
+    db: Session = Depends(db_dep),
+):
+    assert principal.user_id is not None
+    card = db.scalar(
+        select(CharacterCard).where(
+            CharacterCard.id == card_id, CharacterCard.user_id == principal.user_id
+        )
+    )
+    if not card:
+        raise HTTPException(404, "card not found")
+    db.delete(card)
+    db.commit()
+    return {"ok": True}
+
+
+@app.post("/api/me/cards/import")
+def my_card_import(
+    body: CardImportIn,
+    principal: Principal = Depends(current_user),
+    db: Session = Depends(db_dep),
+):
+    assert principal.user_id is not None
+    name = body.name.strip()[:120]
+    if not name:
+        raise HTTPException(400, "name is required")
+    try:
+        import base64
+
+        data = base64.b64decode(body.png_base64)
+        content = extract_card_from_png(data)
+    except Exception as exc:
+        raise HTTPException(400, "无法解析 PNG 角色卡") from exc
+    if not content:
+        raise HTTPException(400, "PNG 中未发现角色卡内容")
+    limit = int(get_runtime_value(db, "max_cards_per_user"))
+    count = db.scalar(
+        select(func.count()).select_from(CharacterCard).where(
+            CharacterCard.user_id == principal.user_id
+        )
+    )
+    if count >= limit:
+        raise HTTPException(400, f"角色卡数量已达上限（{limit} 张）")
+    fmt = detect_format(content)
+    card = CharacterCard(
+        user_id=principal.user_id,
+        name=name,
+        format=fmt,
+        content_encrypted=encrypt_card_content(content[: int(get_runtime_value(db, "card_max_chars"))]),
+        active=False,
+    )
+    db.add(card)
+    db.commit()
+    return _card_meta(card)
+
+
+@app.get("/api/me/presets")
+def my_presets(principal: Principal = Depends(current_user), db: Session = Depends(db_dep)):
+    assert principal.user_id is not None
+    return [
+        {"id": row.id, "name": row.name, "created_at": row.created_at}
+        for row in preset_service.list_presets(db, principal.user_id)
+    ]
+
+
+@app.post("/api/me/presets")
+def my_preset_save(
+    body: PresetSaveIn,
+    principal: Principal = Depends(current_user),
+    db: Session = Depends(db_dep),
+):
+    assert principal.user_id is not None
+    name = body.name.strip()[:120]
+    if not name:
+        raise HTTPException(400, "name is required")
+    existing = preset_service.list_presets(db, principal.user_id)
+    limit = int(get_runtime_value(db, "max_presets_per_user"))
+    if not any(row.name == name for row in existing) and len(existing) >= limit:
+        raise HTTPException(400, f"预设数量已达上限（{limit} 个）")
+    settings_row = _user_settings_for(db, principal.user_id)
+    preset_service.save_preset(
+        db, principal.user_id, name, preset_service.snapshot_settings(settings_row)
+    )
+    db.commit()
+    return {"ok": True, "name": name}
+
+
+@app.post("/api/me/presets/{preset_id}/apply")
+def my_preset_apply(
+    preset_id: str,
+    principal: Principal = Depends(current_user),
+    db: Session = Depends(db_dep),
+):
+    assert principal.user_id is not None
+    row = db.scalar(
+        select(Preset).where(Preset.id == preset_id, Preset.user_id == principal.user_id)
+    )
+    if not row:
+        raise HTTPException(404, "preset not found")
+    preset_service.apply_snapshot(db, _user_settings_for(db, principal.user_id), row.config)
+    db.commit()
+    return {"ok": True}
+
+
+@app.delete("/api/me/presets/{preset_id}")
+def my_preset_delete(
+    preset_id: str,
+    principal: Principal = Depends(current_user),
+    db: Session = Depends(db_dep),
+):
+    assert principal.user_id is not None
+    row = db.scalar(
+        select(Preset).where(Preset.id == preset_id, Preset.user_id == principal.user_id)
+    )
+    if not row:
+        raise HTTPException(404, "preset not found")
+    db.delete(row)
+    db.commit()
+    return {"ok": True}
+
+
+@app.get("/api/me/memories")
+def my_memories(principal: Principal = Depends(current_user), db: Session = Depends(db_dep)):
+    assert principal.user_id is not None
+    rows = db.scalars(
+        select(Memory).where(Memory.user_id == principal.user_id).order_by(Memory.created_at)
+    )
+    return [
+        {"id": row.id, "content": memory_text(row), "created_at": row.created_at}
+        for row in rows
+    ]
+
+
+@app.post("/api/me/memories")
+def my_memory_add(
+    body: MemoryAddIn,
+    principal: Principal = Depends(current_user),
+    db: Session = Depends(db_dep),
+):
+    assert principal.user_id is not None
+    limit = int(get_runtime_value(db, "max_memories_per_user"))
+    count = db.scalar(
+        select(func.count()).select_from(Memory).where(Memory.user_id == principal.user_id)
+    )
+    if count >= limit:
+        raise HTTPException(400, f"记忆条数已达上限（{limit} 条）")
+    max_chars = int(get_runtime_value(db, "memory_max_chars"))
+    from .security import encrypt_secret
+
+    row = Memory(
+        user_id=principal.user_id,
+        content="",
+        content_encrypted=encrypt_secret(body.content[:max_chars]),
+    )
+    db.add(row)
+    db.commit()
+    return {"ok": True, "id": row.id}
+
+
+@app.delete("/api/me/memories/{memory_id}")
+def my_memory_delete(
+    memory_id: str,
+    principal: Principal = Depends(current_user),
+    db: Session = Depends(db_dep),
+):
+    assert principal.user_id is not None
+    row = db.scalar(
+        select(Memory).where(Memory.id == memory_id, Memory.user_id == principal.user_id)
+    )
+    if not row:
+        raise HTTPException(404, "memory not found")
+    db.delete(row)
+    db.commit()
+    return {"ok": True}
+
+
+@app.post("/api/me/memories/clear")
+def my_memory_clear(
+    principal: Principal = Depends(current_user), db: Session = Depends(db_dep)
+):
+    assert principal.user_id is not None
+    db.execute(delete(Memory).where(Memory.user_id == principal.user_id))
+    db.commit()
+    return {"ok": True}
+
+
+@app.get("/api/me/providers")
+def my_providers(principal: Principal = Depends(current_user), db: Session = Depends(db_dep)):
+    assert principal.user_id is not None
+    rows = db.scalars(
+        select(UserProvider)
+        .where(UserProvider.user_id == principal.user_id)
+        .order_by(UserProvider.created_at)
+    )
+    return [
+        {
+            "id": p.id,
+            "provider_key": p.provider_key,
+            "base_url": p.base_url,
+            "models": p.models,
+            "is_default": p.is_default,
+            "created_at": p.created_at,
+        }
+        for p in rows
+    ]
+
+
+@app.post("/api/me/providers")
+def my_provider_add(
+    body: ProviderIn,
+    principal: Principal = Depends(current_user),
+    db: Session = Depends(db_dep),
+):
+    assert principal.user_id is not None
+    if not body.provider_key.strip() or not body.api_key.strip():
+        raise HTTPException(400, "provider_key 与 api_key 必填")
+    if not body.base_url.startswith("https://"):
+        raise HTTPException(400, "base_url 必须是 https 地址")
+    limit = int(get_runtime_value(db, "max_providers_per_user"))
+    count = db.scalar(
+        select(func.count()).select_from(UserProvider).where(
+            UserProvider.user_id == principal.user_id
+        )
+    )
+    if count >= limit:
+        raise HTTPException(400, f"自带供应商已达上限（{limit} 个）")
+    from .security import encrypt_secret
+
+    row = UserProvider(
+        user_id=principal.user_id,
+        provider_key=body.provider_key.strip()[:80],
+        base_url=body.base_url.strip()[:500],
+        api_key_encrypted=encrypt_secret(body.api_key),
+        models=[m.strip()[:160] for m in body.models if m.strip()][:50],
+    )
+    db.add(row)
+    db.commit()
+    return {"ok": True, "id": row.id}
+
+
+@app.delete("/api/me/providers/{provider_id}")
+def my_provider_delete(
+    provider_id: str,
+    principal: Principal = Depends(current_user),
+    db: Session = Depends(db_dep),
+):
+    assert principal.user_id is not None
+    row = db.scalar(
+        select(UserProvider).where(
+            UserProvider.id == provider_id, UserProvider.user_id == principal.user_id
+        )
+    )
+    if not row:
+        raise HTTPException(404, "provider not found")
+    db.delete(row)
+    db.commit()
+    return {"ok": True}
+
+
+@app.post("/api/me/password")
+def my_password_change(
+    body: PasswordChangeIn,
+    authorization: str | None = Header(None),
+    principal: Principal = Depends(current_user),
+    db: Session = Depends(db_dep),
+):
+    assert principal.user_id is not None
+    from .security import verify_password
+
+    account = db.scalar(
+        select(Account).where(Account.user_id == principal.user_id, Account.is_active.is_(True))
+    )
+    if not account or not verify_password(body.old_password, account.password_hash):
+        raise HTTPException(400, "原密码不正确")
+    account.password_hash = hash_password(
+        body.new_password, min_length=int(get_runtime_value(db, "password_min_length"))
+    )
+    db.commit()
+    # 撤销该账号其他会话（保留当前会话）
+    token = (authorization or "").removeprefix("Bearer ").strip()
+    from .auth import _token_hash
+
+    db.execute(
+        delete(AuthSession).where(
+            AuthSession.account_id == account.id,
+            AuthSession.token_hash != _token_hash(token),
+        )
+    )
+    db.commit()
+    return {"ok": True}
+
+
+@app.get("/api/me/sessions")
+def my_sessions(principal: Principal = Depends(current_user), db: Session = Depends(db_dep)):
+    assert principal.user_id is not None
+    rows = db.scalars(
+        select(AuthSession)
+        .where(AuthSession.user_id == principal.user_id)
+        .order_by(AuthSession.created_at.desc())
+    )
+    return [
+        {"id": row.id, "role": row.role, "expires_at": row.expires_at, "created_at": row.created_at}
+        for row in rows
+    ]
+
+
+@app.post("/api/me/sessions/revoke-all")
+def my_sessions_revoke_all(
+    authorization: str | None = Header(None),
+    principal: Principal = Depends(current_user),
+    db: Session = Depends(db_dep),
+):
+    assert principal.user_id is not None
+    from .auth import _token_hash
+
+    token = (authorization or "").removeprefix("Bearer ").strip()
+    db.execute(
+        delete(AuthSession).where(
+            AuthSession.user_id == principal.user_id,
+            AuthSession.token_hash != _token_hash(token),
+        )
+    )
+    db.commit()
+    return {"ok": True}
+
+
+@app.get("/api/me/usage")
+def my_usage(
+    principal: Principal = Depends(current_user),
+    db: Session = Depends(db_dep),
+    days: int = 7,
+):
+    assert principal.user_id is not None
+    start = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(
+        days=max(1, min(days, 30)) - 1
+    )
+    rows = db.execute(
+        select(
+            func.date(UsageRecord.created_at).label("day"),
+            func.coalesce(
+                func.sum(UsageRecord.prompt_tokens + UsageRecord.completion_tokens), 0
+            ).label("tokens"),
+        )
+        .where(UsageRecord.user_id == principal.user_id, UsageRecord.created_at >= start)
+        .group_by("day")
+        .order_by("day")
+    )
+    return [{"date": day, "tokens": int(tokens)} for day, tokens in rows]
 
 
 @app.get("/api/admin/stats", dependencies=[Depends(admin)])
