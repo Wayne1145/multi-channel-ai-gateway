@@ -15,7 +15,7 @@ from wecom_ai_gateway.models import (
 )
 from wecom_ai_gateway.runtime_settings import update_settings
 from wecom_ai_gateway.security import encrypt_secret, external_id_hash
-from wecom_ai_gateway.services import _split_reply
+from wecom_ai_gateway.services import _split_reply, process_message
 
 client = TestClient(app)
 ADMIN_HEADERS = {"X-Admin-Token": "test-admin-token"}
@@ -105,6 +105,84 @@ def test_long_reply_sends_multiple_chunks(db, monkeypatch):
         fake.sent.append(chunk)
     assert len(fake.sent) >= 3
     assert all(len(c) <= 200 for c in fake.sent)
+
+
+def test_process_message_splits_long_reply_into_multiple_outbound(db, monkeypatch):
+    """完整链路：模型返回超长内容 → process_message 分片 → 多条出站记录。"""
+    import asyncio
+
+    from wecom_ai_gateway.config import settings
+    from wecom_ai_gateway.providers import CompletionResult
+
+    update_settings(db, {"message_chunk_chars": 200})
+    monkeypatch.setattr(settings, "openai_compatible_api_key", "sk-test")
+
+    class FakeAdapter(ChannelAdapter):
+        channel_key = "wechat_clawbot"
+
+        def __init__(self) -> None:
+            self.sent: list[str] = []
+
+        async def start_instance(self, instance_id: str) -> dict:
+            return {"status": "online"}
+
+        async def stop_instance(self, instance_id: str) -> None:
+            return None
+
+        async def send(self, message: OutgoingMessage) -> str:
+            self.sent.append(message.text)
+            return f"id-{len(self.sent)}"
+
+    fake = FakeAdapter()
+    monkeypatch.setattr("wecom_ai_gateway.services.registry.get", lambda key: fake)
+
+    class FakeProvider:
+        async def complete(self, *args, **kwargs):
+            return CompletionResult(content="长" * 500, prompt_tokens=10, completion_tokens=10)
+
+    monkeypatch.setattr("wecom_ai_gateway.services.provider_for", lambda *a, **k: FakeProvider())
+
+    user = User(display_name="chunk-full", mode="self_service")
+    db.add(user)
+    db.flush()
+    db.add(UserSettings(user_id=user.id))
+    db.add(
+        ChannelIdentity(
+            user_id=user.id,
+            channel="wechat_clawbot",
+            account_id="i-full",
+            external_id_hash=external_id_hash("sender-full"),
+            external_id_encrypted=encrypt_secret("sender-full"),
+        )
+    )
+    conversation = Conversation(user_id=user.id)
+    db.add(conversation)
+    db.flush()
+    row = Message(
+        conversation_id=conversation.id,
+        user_id=user.id,
+        channel="wechat_clawbot",
+        channel_instance_id="i-full",
+        external_message_id="in-full-1",
+        direction="inbound",
+        message_type="text",
+        content="请写长一点",
+        status=MessageStatus.queued,
+        metadata_json={"instance_id": "i-full"},
+    )
+    db.add(row)
+    db.flush()
+    db.add(OutboxTask(task_type="message", dedupe_key=f"message:{row.id}", payload={"message_id": row.id}))
+    db.commit()
+
+    asyncio.run(process_message(row.id))
+    db.expire_all()
+
+    assert len(fake.sent) >= 3
+    assert all(len(c) <= 200 for c in fake.sent)
+    outbound = db.query(Message).filter_by(direction="outbound").all()
+    assert len(outbound) == len(fake.sent)
+    assert all(o.status == MessageStatus.sent for o in outbound)
 
 
 def test_users_list_exposes_masked_identities_and_account_state(db):

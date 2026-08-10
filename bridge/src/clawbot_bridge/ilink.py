@@ -7,6 +7,7 @@ HTTP 契约依据腾讯 MIT 许可的 ``@tencent-weixin/openclaw-weixin`` 2.4.6
 import asyncio
 import base64
 import hashlib
+import ipaddress
 import logging
 import secrets
 from dataclasses import dataclass, field
@@ -150,10 +151,26 @@ def _aes_padded_size(raw_size: int) -> int:
 
 
 async def _download_remote(url: str) -> bytes:
-    """下载出站媒体原文件；仅允许无凭据 https，避免 SSRF。"""
+    """下载出站媒体原文件；仅允许无凭据 https，且拒绝私网/环回地址，避免 SSRF。"""
     parsed = httpx.URL(url)
     if parsed.scheme != "https" or not parsed.host or parsed.userinfo:
         raise ValueError("媒体下载地址必须是无凭据的 https URL")
+    try:
+        host_ip = ipaddress.ip_address(parsed.host)
+    except ValueError:
+        # 域名：尝试解析后拒绝私网地址；解析失败时放行并交由连接层兜底
+        import socket
+
+        try:
+            for info in socket.getaddrinfo(parsed.host, None):
+                ip = ipaddress.ip_address(info[4][0])
+                if not ip.is_global:
+                    raise ValueError("媒体下载地址不能指向内网/环回地址")
+        except socket.gaierror:
+            pass
+    else:
+        if not host_ip.is_global:
+            raise ValueError("媒体下载地址不能指向内网/环回地址")
     async with httpx.AsyncClient(timeout=60.0) as client:
         response = await client.get(url)
         response.raise_for_status()

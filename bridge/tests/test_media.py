@@ -148,6 +148,26 @@ async def test_ilink_send_media_rejects_insecure_download_url():
 
 
 @pytest.mark.anyio
+async def test_ilink_send_media_rejects_private_ip_url():
+    """SSRF 防护：https 但指向内网/环回地址也必须拒绝。"""
+    credentials = ILinkCredentials("bot-token", "https://ilinkai.weixin.qq.com")
+    client = ILinkClient(credentials)
+
+    with pytest.raises(ValueError, match="内网"):
+        await client.send_media(
+            to_user_id="user@im.wechat",
+            context_token="ctx-media",
+            media={"media_type": "image", "url": "https://10.0.0.8/a.png"},
+        )
+    with pytest.raises(ValueError, match="内网"):
+        await client.send_media(
+            to_user_id="user@im.wechat",
+            context_token="ctx-media",
+            media={"media_type": "image", "url": "https://127.0.0.1/a.png"},
+        )
+
+
+@pytest.mark.anyio
 async def test_runtime_send_with_media_uses_exact_context_token():
     import tempfile
     from pathlib import Path
