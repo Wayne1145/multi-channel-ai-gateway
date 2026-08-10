@@ -146,8 +146,33 @@ def verify_callback(msg_signature: str, timestamp: str, nonce: str, echostr: str
 async def callback(request: Request, msg_signature: str, timestamp: str, nonce: str):
     event = parse_callback(await request.body(), msg_signature, timestamp, nonce)
     if event.event == "kf_msg_or_event" and event.token:
-        enqueue_sync(event.token, event.open_kfid)
+        if event.msg_id and event.status == "2":
+            _mark_wecom_send_failed(event.msg_id, event.fail_reason)
+        else:
+            enqueue_sync(event.token, event.open_kfid)
     return Response("success", media_type="text/plain")
+
+
+def _mark_wecom_send_failed(msg_id: str, fail_reason: str) -> None:
+    """企业微信推送发送失败事件（Status=2）时，将对应出站消息标记失败。"""
+    db = SessionLocal()
+    try:
+        row = db.scalar(
+            select(Message).where(
+                Message.channel == "wecom_kf",
+                Message.external_message_id == msg_id,
+                Message.direction == "outbound",
+            )
+        )
+        if row and row.status in (MessageStatus.sent, MessageStatus.processing):
+            row.status = MessageStatus.failed
+            row.error = redact_error(fail_reason or "wecom send failed", 1000)
+            db.commit()
+            log.warning("企微发送失败事件 msg_id=%s reason=%s", msg_id, redact_error(fail_reason or "", 200))
+    except Exception:
+        log.exception("处理企微发送失败事件失败 msg_id=%s", msg_id)
+    finally:
+        db.close()
 
 
 @app.get("/", response_class=HTMLResponse)

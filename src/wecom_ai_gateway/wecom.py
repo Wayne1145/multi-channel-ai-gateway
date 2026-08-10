@@ -21,6 +21,9 @@ class CallbackEvent:
     token: str
     open_kfid: str
     event: str
+    msg_id: str = ""
+    status: str = ""
+    fail_reason: str = ""
 
 
 def verify_signature(signature, timestamp, nonce, encrypted):
@@ -57,6 +60,9 @@ def parse_callback(body: bytes, signature: str, timestamp: str, nonce: str) -> C
         event.findtext("Token") or "",
         event.findtext("OpenKfId") or "",
         event.findtext("Event") or event.findtext("MsgType") or "unknown",
+        event.findtext("MsgId") or "",
+        event.findtext("Status") or "",
+        event.findtext("FailReason") or "",
     )
 
 

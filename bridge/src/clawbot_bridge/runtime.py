@@ -49,6 +49,14 @@ class ILinkRuntime(Protocol):
         text: str,
     ) -> str: ...
 
+    async def send_media(
+        self,
+        credentials: ILinkCredentials,
+        to_user_id: str,
+        context_token: str,
+        media: dict,
+    ) -> str: ...
+
 
 @dataclass
 class InstanceState:
@@ -213,6 +221,7 @@ class BridgeRuntime:
                     sender_id=parsed.sender_id,
                     external_message_id=parsed.external_message_id,
                     content=parsed.content,
+                    media=list(parsed.media),
                     raw=parsed.raw,
                 ),
             )
@@ -279,6 +288,19 @@ class BridgeRuntime:
         context_token = state.context_tokens.get(str(reply_to)) if reply_to else None
         if not context_token:
             raise RuntimeError("找不到与 reply_to 匹配的 context_token")
+        media_list = list(metadata.get("media") or [])
+        if media_list:
+            last_id = ""
+            for media in media_list:
+                if not isinstance(media, dict):
+                    continue
+                last_id = await self._ilink.send_media(
+                    state.credentials,
+                    conversation_id,
+                    context_token,
+                    media,
+                )
+            return last_id
         return await self._ilink.send_text(
             state.credentials,
             conversation_id,

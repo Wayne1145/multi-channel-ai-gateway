@@ -11,6 +11,7 @@ class InboundTextMessage:
     sender_id: str
     external_message_id: str
     content: str
+    media: list[dict] = field(default_factory=list)
     raw: dict = field(default_factory=dict)
 
 
@@ -34,7 +35,7 @@ class GatewayClient:
             "external_message_id": message.external_message_id,
             "message_type": "text",
             "content": message.content,
-            "media": [],
+            "media": message.media,
             "raw": message.raw,
         }
         async with httpx.AsyncClient(timeout=self._timeout_seconds) as client:

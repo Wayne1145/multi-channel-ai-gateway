@@ -64,13 +64,14 @@ def create_app(*, runtime: BridgeRuntime, bridge_token: str) -> FastAPI:
 
     @app.post("/instances/{instance_id}/messages", dependencies=[Depends(authorize)])
     async def send_message(instance_id: str, message: OutboundMessage) -> dict:
+        metadata = dict(message.metadata)
         if message.media:
-            raise HTTPException(status_code=501, detail="media is not supported yet")
+            metadata["media"] = message.media
         message_id = await runtime.send(
             instance_id,
             message.conversation_id,
             message.text,
-            message.metadata,
+            metadata,
         )
         return {"messageId": message_id}
 

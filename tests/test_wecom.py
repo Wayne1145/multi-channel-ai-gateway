@@ -31,3 +31,55 @@ def test_callback_crypto():
     assert verify_signature(sig, ts, nonce, encrypted)
     assert decrypt(encrypted).startswith(b"<xml>")
     assert not verify_signature("bad", ts, nonce, encrypted)
+
+
+def test_send_fail_event_marks_outbound_message_failed(database):
+    from fastapi.testclient import TestClient
+
+    from wecom_ai_gateway.db import Base, SessionLocal, engine
+    from wecom_ai_gateway.main import app
+    from wecom_ai_gateway.models import Message, MessageStatus, User
+
+    Base.metadata.create_all(engine)
+    client = TestClient(app)
+    db = SessionLocal()
+    user = User(display_name="FailTarget")
+    db.add(user)
+    db.flush()
+    row = Message(
+        channel="wecom_kf",
+        channel_instance_id="wkFail",
+        external_message_id="out-msg-123",
+        direction="outbound",
+        message_type="text",
+        content="回复内容",
+        status=MessageStatus.sent,
+        user_id=user.id,
+    )
+    db.add(row)
+    db.commit()
+    db.close()
+
+    settings.wecom_callback_token = "Token123"
+    payload = (
+        "<xml><Event>kf_msg_or_event</Event><Token>tk</Token><OpenKfId>wkFail</OpenKfId>"
+        "<MsgId>out-msg-123</MsgId><Status>2</Status><FailReason>用户已删除会话或长时间未回复</FailReason></xml>"
+    ).encode()
+    encrypted = encrypt(payload)
+    ts, nonce = "123", "456"
+    sig = hashlib.sha1(
+        "".join(sorted([settings.wecom_callback_token, ts, nonce, encrypted])).encode()
+    ).hexdigest()
+
+    response = client.post(
+        "/wecom/kf/callback",
+        params={"msg_signature": sig, "timestamp": ts, "nonce": nonce},
+        content=f"<xml><Encrypt>{encrypted}</Encrypt></xml>",
+    )
+
+    assert response.status_code == 200
+    db = SessionLocal()
+    refreshed = db.get(Message, row.id)
+    assert refreshed.status == MessageStatus.failed
+    assert "用户已删除会话" in (refreshed.error or "")
+    db.close()

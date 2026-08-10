@@ -64,3 +64,17 @@ class ILinkService:
             context_token=context_token,
             text=text,
         )
+
+    async def send_media(
+        self,
+        credentials: ILinkCredentials,
+        to_user_id: str,
+        context_token: str,
+        media: dict,
+    ) -> str:
+        client = self._client_factory(credentials)
+        return await client.send_media(
+            to_user_id=to_user_id,
+            context_token=context_token,
+            media=media,
+        )

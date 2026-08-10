@@ -7,6 +7,7 @@ from redis.exceptions import RedisError
 from sqlalchemy import or_, select, update
 from sqlalchemy.exc import IntegrityError
 
+from .config import settings
 from .db import SessionLocal
 from .models import Message, MessageStatus, OutboxStatus, OutboxTask
 from .queueing import notify_worker, redis_client
@@ -194,6 +195,16 @@ def fail_task(
         task.lease_token = None
         if task.attempts >= int(get_runtime_value(db, "task_max_attempts")):
             task.status = OutboxStatus.dead
+            try:
+                from .alert import send_alert
+
+                send_alert(
+                    f"[{settings.app_name}] 任务进入死信",
+                    f"task={task.id}\ntype={task.task_type}\nattempts={task.attempts}\n"
+                    f"error={task.last_error or ''}",
+                )
+            except Exception:
+                log.exception("死信告警失败 task=%s", task.id)
             if task.task_type == "message":
                 message = db.get(Message, task.payload.get("message_id"))
                 if message:

@@ -21,6 +21,7 @@ from sqlalchemy.orm import Session
 
 from .config import settings
 from .models import PlatformConfig, SettingOverride
+from .security import encrypt_secret
 
 
 @dataclass(frozen=True)
@@ -35,6 +36,7 @@ class SettingSpec:
     max: float | None = None
     options: tuple[str, ...] | None = None
     secret: bool = False
+    write_only: bool = False
     editable: bool = True
     description: str = ""
     unit: str = ""
@@ -177,6 +179,22 @@ SPECS: list[SettingSpec] = [
                 min=0, max=3650, unit="天", description="超过天数的死信任务会被删除；0=不清理。"),
     SettingSpec("audit_retention_days", "retention", "审计日志保留天数", "int", default=0,
                 min=0, max=3650, unit="天", description="超过天数的审计日志会被删除；0=不清理。"),
+    # ---------- 10. 告警 ----------
+    SettingSpec("alert_email_enabled", "alert", "启用邮件告警", "bool", default=False,
+                description="关闭时告警仅写日志；开启后仍需填写 SMTP 与收件人。"),
+    SettingSpec("alert_email_recipient", "alert", "告警收件人", "str", default="", max=500,
+                description="接收告警的邮箱地址，多个用逗号分隔。"),
+    SettingSpec("smtp_host", "alert", "SMTP 服务器", "str", default="", max=255,
+                description="邮件服务器地址，如 smtp.example.com。"),
+    SettingSpec("smtp_port", "alert", "SMTP 端口", "int", default=465, min=1, max=65535,
+                unit="端口", description="465=SSL，587=STARTTLS。"),
+    SettingSpec("smtp_user", "alert", "SMTP 账号", "str", default="", max=255,
+                description="发信账号。"),
+    SettingSpec("smtp_password", "alert", "SMTP 密码", "str", default="", max=255,
+                secret=True, write_only=True,
+                description="发信密码/授权码；后台可填写，永不回显。"),
+    SettingSpec("smtp_from", "alert", "发件人地址", "str", default="", max=255,
+                description="邮件 From 地址。"),
 ]
 
 SPEC_BY_KEY: dict[str, SettingSpec] = {spec.key: spec for spec in SPECS}
@@ -369,13 +387,20 @@ def update_settings(db: Session, values: dict[str, Any]) -> dict[str, str]:
         if spec is None:
             errors[key] = "未知设置项"
             continue
-        if spec.secret or not spec.editable:
+        if not spec.editable:
             errors[key] = "该设置只读，请通过 .env 修改"
             continue
+        if spec.secret and not spec.write_only:
+            errors[key] = "该密钥只读，请通过 .env 管理"
+            continue
+        if spec.write_only and (raw is None or str(raw).strip() == ""):
+            continue  # 留空表示不修改
         try:
-            normalized[key] = _coerce(raw, spec)
+            value = _coerce(raw, spec)
         except ValueError as exc:
             errors[key] = str(exc)
+            continue
+        normalized[key] = encrypt_secret(value) if spec.write_only else value
     if errors:
         return errors
     for key, value in normalized.items():
@@ -398,6 +423,26 @@ def settings_view(db: Session) -> list[dict]:
     for spec in SPECS:
         overridable = OVERRIDABLE_KEYS.get(spec.key)
         if spec.secret:
+            if spec.write_only:
+                # 可写密钥：不回显内容，仅标记是否已设置（DB 有值）
+                value = {"configured": spec.key in rows}
+                item = {
+                    "key": spec.key,
+                    "group": spec.group,
+                    "label": spec.label,
+                    "type": "str",
+                    "value": value,
+                    "default": None,
+                    "min": None,
+                    "max": spec.max,
+                    "options": None,
+                    "secret": True,
+                    "editable": True,
+                    "description": spec.description,
+                    "unit": spec.unit,
+                }
+                view.append(item)
+                continue
             configured = bool(getattr(settings, spec.env_attr, "") if spec.env_attr else "")
             value: Any = {"configured": configured}
         else:

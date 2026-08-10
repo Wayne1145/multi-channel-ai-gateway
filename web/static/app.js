@@ -558,12 +558,17 @@
     general: "基础与公告", model: "模型与供应商", account: "用户与账号",
     quota: "用量与限额", content: "消息与内容", media: "媒体",
     task: "任务与可靠性", channel: "渠道与 ClawBot", retention: "数据保留",
+    alert: "告警",
   };
-  const groupOrder = ["general", "model", "account", "quota", "content", "media", "task", "channel", "retention"];
+  const groupOrder = ["general", "model", "account", "quota", "content", "media", "task", "channel", "retention", "alert"];
   let settingsState = [];
 
   function settingInputHtml(s) {
     if (s.secret) {
+      if (s.editable && s.type === "str") {
+        // 可写密钥（如 SMTP 密码）：留空表示不修改
+        return `<input type="password" class="field settings-input" data-setting="${s.key}" placeholder="${s.value.configured ? "已设置，留空则不修改" : "未设置"}" autocomplete="new-password">`;
+      }
       return `<span class="badge ${s.value.configured ? "badge-ok" : ""}">${s.value.configured ? "已配置（内容仅存于环境变量）" : "未配置"}</span>`;
     }
     if (!s.editable) {
@@ -591,6 +596,10 @@
     const el = document.querySelector(`[data-setting="${s.key}"]`);
     if (!el) return undefined;
     if (s.type === "bool") return el.checked;
+    if (s.secret && s.editable && s.type === "str") {
+      // 可写密钥：空值不提交（保持原值）
+      return el.value ? el.value : undefined;
+    }
     if (s.type === "int") {
       if (el.value === "") return undefined;
       const n = parseInt(el.value, 10);

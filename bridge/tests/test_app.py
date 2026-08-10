@@ -80,18 +80,22 @@ def test_bridge_instance_lifecycle_and_message_contract() -> None:
     assert runtime.stopped == ["instance-1"]
 
 
-def test_bridge_rejects_media_until_private_runtime_supports_it() -> None:
-    client = TestClient(create_app(runtime=FakeRuntime(), bridge_token="bridge-secret"))
+def test_bridge_accepts_media_and_forwards_to_runtime() -> None:
+    runtime = FakeRuntime()
+    client = TestClient(create_app(runtime=runtime, bridge_token="bridge-secret"))
 
     response = client.post(
         "/instances/instance-1/messages",
         headers={"Authorization": "Bearer bridge-secret"},
         json={
             "conversationId": "user@im.wechat",
-            "text": "",
-            "media": [{"media_type": "image", "url": "https://example.com/a.png"}],
+            "text": "配图",
+            "media": [{"media_type": "image", "url": "https://example.com/a.png", "filename": "a.png"}],
             "metadata": {},
         },
     )
 
-    assert response.status_code == 501
+    assert response.status_code == 200
+    assert runtime.sent[-1][3] == {
+        "media": [{"media_type": "image", "url": "https://example.com/a.png", "filename": "a.png"}]
+    }
