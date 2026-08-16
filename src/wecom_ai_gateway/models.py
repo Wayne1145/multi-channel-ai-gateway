@@ -224,6 +224,37 @@ class PlatformConfig(Base):
     )
 
 
+class KnowledgeItem(Base):
+    """用户知识库条目；内容按用户隔离，用于检索增强。"""
+
+    __tablename__ = "knowledge_items"
+    __table_args__ = (UniqueConstraint("user_id", "title", name="uq_knowledge_user_title"),)
+    id: Mapped[str] = mapped_column(
+        String(36), primary_key=True, default=lambda: str(uuid.uuid4())
+    )
+    user_id: Mapped[str] = mapped_column(String(36), index=True)
+    title: Mapped[str] = mapped_column(String(255))
+    content: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class BindCode(Base):
+    """跨渠道身份绑定码：6 位数字、短时效、一次性。"""
+
+    __tablename__ = "bind_codes"
+    code: Mapped[str] = mapped_column(String(8), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(36), index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
 class SettingOverride(Base):
     """渠道/用户级设置覆盖；解析优先级：用户 > 渠道 > 平台配置 > .env。"""
 

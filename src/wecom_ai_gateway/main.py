@@ -969,6 +969,56 @@ def my_usage(
     return [{"date": day, "tokens": int(tokens)} for day, tokens in rows]
 
 
+@app.get("/api/admin/sessions", dependencies=[Depends(admin)])
+def admin_sessions(
+    db: Session = Depends(db_dep),
+    limit: int = 100,
+    user_id: str = "",
+):
+    query = select(AuthSession)
+    if user_id:
+        query = query.where(AuthSession.user_id == user_id)
+    rows = db.scalars(query.order_by(AuthSession.created_at.desc()).limit(min(limit, 500)))
+    accounts = {
+        account.id: account.username
+        for account in db.scalars(select(Account))
+    }
+    return {
+        "sessions": [
+            {
+                "id": row.id,
+                "user_id": row.user_id,
+                "account_username": accounts.get(row.account_id) if row.account_id else None,
+                "role": row.role,
+                "expires_at": row.expires_at,
+                "created_at": row.created_at,
+            }
+            for row in rows
+        ]
+    }
+
+
+@app.post("/api/admin/sessions/{session_id}/revoke", dependencies=[Depends(admin)])
+def admin_revoke_session(session_id: str, db: Session = Depends(db_dep)):
+    row = db.get(AuthSession, session_id)
+    if not row:
+        raise HTTPException(404, "session not found")
+    db.delete(row)
+    db.add(AuditLog(action="session.revoke", detail={"session_id": session_id}))
+    db.commit()
+    return {"ok": True}
+
+
+@app.post("/api/admin/users/{user_id}/sessions/revoke-all", dependencies=[Depends(admin)])
+def admin_revoke_all_user_sessions(user_id: str, db: Session = Depends(db_dep)):
+    if not db.get(User, user_id):
+        raise HTTPException(404, "user not found")
+    count = db.query(AuthSession).filter(AuthSession.user_id == user_id).delete()
+    db.add(AuditLog(action="session.revoke_all", detail={"user_id": user_id, "count": count}))
+    db.commit()
+    return {"ok": True, "revoked": count}
+
+
 @app.get("/api/admin/stats", dependencies=[Depends(admin)])
 def stats(db: Session = Depends(db_dep)):
     return {

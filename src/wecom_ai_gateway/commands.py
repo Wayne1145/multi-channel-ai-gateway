@@ -53,7 +53,9 @@ HELP = """可用命令：
 /new 开始新会话
 /clear confirm 清除自己的聊天记录
 /memory on|off|list|add <内容>|delete <序号>|clear confirm 管理私有记忆
-/usage 查看今日用量"""
+/usage 查看今日用量
+/bind 获取跨渠道绑定码（/bind <码> 完成绑定）
+/kb add|list|delete|search 管理个人知识库"""
 
 ALLOWED_MODELS = ["deepseek-chat", "deepseek-reasoner"]
 
@@ -156,6 +158,8 @@ def execute(db: Session, user_id: str, text: str) -> CommandResult:
         return CommandResult(True, f"今日已使用约 {total} tokens；额度 {status['quota']}{extra}。")
     if cmd == "/card":
         return _card_command(db, user_id, parts, user_settings)
+    if cmd == "/kb":
+        return _kb_command(db, user_id, parts)
     if cmd == "/preset":
         return _preset_command(db, user_id, parts, user_settings)
     return CommandResult(True, "未知命令。发送 /help 查看可用命令。")
@@ -359,6 +363,45 @@ def _card_command(
         db.delete(card)
         return CommandResult(True, f"角色卡「{card.name}」已删除。")
     return CommandResult(True, "用法：/card list | new <名称> | use <名称> | set <内容> | show [名称] | export [名称] | delete <名称>")
+
+
+def _kb_command(db: Session, user_id: str, parts: list[str]) -> CommandResult:
+    from . import knowledge as kb_service
+
+    action = parts[1].lower() if len(parts) > 1 else "list"
+    if action == "list":
+        rows = kb_service.list_items(db, user_id)
+        if not rows:
+            return CommandResult(True, "知识库为空。发送 /kb add <标题> <内容> 添加条目。")
+        return CommandResult(
+            True,
+            "\n".join(f"- {row.title}（{len(row.content)} 字）" for row in rows),
+        )
+    if action == "add" and len(parts) >= 3:
+        title_content = parts[2].strip()
+        if " " not in title_content:
+            return CommandResult(True, "用法：/kb add <标题> <内容>")
+        title, content = title_content.split(" ", 1)
+        title = title.strip()
+        content = content.strip()
+        try:
+            kb_service.add_item(db, user_id, title, content)
+        except ValueError as exc:
+            return CommandResult(True, str(exc))
+        return CommandResult(True, f"知识库条目「{title}」已保存（{len(content)} 字）。")
+    if action == "delete" and len(parts) >= 3:
+        if kb_service.delete_item(db, user_id, parts[2]):
+            return CommandResult(True, f"已删除「{parts[2]}」。")
+        return CommandResult(True, "没有这个条目。")
+    if action == "search" and len(parts) >= 3:
+        results = kb_service.search(db, user_id, parts[2], limit=3)
+        if not results:
+            return CommandResult(True, "没有找到相关内容。")
+        return CommandResult(
+            True,
+            "\n\n".join(f"【{r['title']}】\n{r['text'][:200]}" for r in results),
+        )
+    return CommandResult(True, "用法：/kb add <标题> <内容> | list | delete <标题> | search <关键词>")
 
 
 def _preset_command(

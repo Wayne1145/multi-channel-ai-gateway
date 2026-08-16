@@ -2,6 +2,7 @@ import logging
 from datetime import UTC, datetime
 
 from sqlalchemy import func, select
+from sqlalchemy.orm import Session
 
 from . import cards as card_service
 from .channels import ChannelMessage, OutgoingMessage, registry
@@ -260,6 +261,26 @@ async def process_message(message_id: str) -> None:
     try:
         user_settings = db.get(UserSettings, row.user_id) or UserSettings(user_id=row.user_id)
         conversation = db.get(Conversation, row.conversation_id)
+        bind_result = _handle_bind_command(db, row)
+        if bind_result is not None:
+            db.add(
+                Message(
+                    conversation_id=conversation.id if conversation else None,
+                    user_id=row.user_id,
+                    channel=row.channel,
+                    channel_instance_id=(row.metadata_json or {}).get("instance_id") or "",
+                    external_message_id=f"local:{row.id}",
+                    direction=MessageDirection.outbound,
+                    message_type="text",
+                    content=bind_result,
+                    status=MessageStatus.sent,
+                    metadata_json={"reply_to": row.external_message_id},
+                )
+            )
+            row.status = MessageStatus.sent
+            db.commit()
+            db.close()
+            return
         text = row.content or ""
         answer = None
         blocked_answer = None
@@ -485,6 +506,20 @@ async def _complete_ai(db, row: Message, conversation: Conversation, user_settin
         system_prompt += "\n\n只在相关时参考这些用户私有记忆：\n" + "\n".join(
             f"- {memory_text(memory)}" for memory in memories
         )
+    if bool(get_runtime_value(db, "kb_enabled")):
+        from .knowledge import build_injection
+
+        kb_text = build_injection(
+            db,
+            row.user_id,
+            row.content or "",
+            max_chunks=int(get_runtime_value(db, "kb_max_chunks")),
+            chunk_chars=int(get_runtime_value(db, "kb_chunk_chars")),
+        )
+        if kb_text:
+            system_prompt += (
+                "\n\n以下是用户知识库中与问题相关的内容，回答时优先参考：\n" + kb_text
+            )
     prompts = [{"role": "system", "content": system_prompt}]
     prompts.extend(
         {
@@ -515,6 +550,46 @@ async def _complete_ai(db, row: Message, conversation: Conversation, user_settin
         )
     )
     return result.content
+
+
+def _handle_bind_command(db: Session, row: Message) -> str | None:
+    """处理跨渠道绑定指令 /bind；非绑定指令返回 None。"""
+    content = (row.content or "").strip()
+    if not content.startswith("/bind"):
+        return None
+    from .binding import create_bind_code, resolve_bind
+
+    metadata = row.metadata_json or {}
+    channel = row.channel
+    account_id = metadata.get("instance_id") or (metadata.get("open_kfid") or "")
+    identity = db.scalar(
+        select(ChannelIdentity).where(
+            ChannelIdentity.user_id == row.user_id,
+            ChannelIdentity.channel == channel,
+            ChannelIdentity.account_id == account_id,
+        )
+    )
+    if identity is None:
+        return "绑定需要先通过该渠道发送一条消息以识别身份。"
+    external_id = decrypt_secret(identity.external_id_encrypted)
+    parts = content.split()
+    if len(parts) == 1:
+        code = create_bind_code(db, row.user_id)
+        return (
+            f"跨渠道绑定：请在另一个微信渠道发送 /bind {code} 完成合并。"
+            f"绑定码 10 分钟内有效，仅限一次。"
+        )
+    if len(parts) == 2:
+        result = resolve_bind(
+            db,
+            parts[1],
+            user_id=row.user_id,
+            channel=channel,
+            account_id=account_id,
+            external_id=external_id,
+        )
+        return result["message"]
+    return "用法：/bind 获取绑定码；/bind <码> 完成绑定。"
 
 
 def _split_reply(text: str, limit: int) -> list[str]:

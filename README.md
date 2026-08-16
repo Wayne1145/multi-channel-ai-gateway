@@ -50,6 +50,7 @@
 /memory add 我偏好简洁回答
 /memory list
 /usage
+/bind
 ```
 
 所有命令只修改发送者自己的配置。用户不能读取他人的会话或记忆。

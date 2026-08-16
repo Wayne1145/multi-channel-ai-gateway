@@ -299,6 +299,7 @@
       $("account-username").value = accountUsername || "";
       $("account-password").value = "";
       $("display-name-input-admin").value = (name && !name.startsWith("未命名") && name !== "(未命名)") ? name : "";
+      loadAdminSessions(userId);
       $("user-detail-grid").innerHTML = [
         ["会话数", detail.conversations],
         ["记忆条数", detail.memories],
@@ -903,6 +904,32 @@
     })
     .catch(() => {});
   $("settings-save").addEventListener("click", saveSettings);
+  async function loadAdminSessions(userId) {
+    try {
+      const data = await api(`/api/admin/sessions?limit=50&user_id=${userId}`);
+      $("admin-session-tbody").innerHTML = data.sessions.length
+        ? data.sessions.map((s) => `
+            <tr>
+              <td class="mono small">${esc(s.id.slice(0, 8))}</td>
+              <td>${esc(s.role)}</td>
+              <td class="mono small muted">${esc((s.expires_at || "").replace("T", " ").slice(0, 16))}</td>
+              <td><button class="btn btn-sm btn-danger" data-admin-session-revoke="${s.id}">踢出</button></td>
+            </tr>`).join("")
+        : '<tr><td colspan="4" class="muted">无登录会话</td></tr>';
+      document.querySelectorAll("[data-admin-session-revoke]").forEach((b) =>
+        b.addEventListener("click", async () => {
+          await api(`/api/admin/sessions/${b.dataset.adminSessionRevoke}/revoke`, { method: "POST" });
+          toast("已踢出该会话"); loadAdminSessions(userId);
+        }));
+    } catch (ex) { /* 会话加载失败不阻塞弹窗 */ }
+  }
+  $("admin-sessions-revoke-all").addEventListener("click", async () => {
+    const userId = $("user-modal").dataset.userId;
+    if (!userId) return;
+    if (!window.confirm("确认踢出该用户的全部登录会话？")) return;
+    await api(`/api/admin/users/${userId}/sessions/revoke-all`, { method: "POST" });
+    toast("已踢出全部会话"); loadAdminSessions(userId);
+  });
   $("display-name-save").addEventListener("click", async () => {
     const userId = $("user-modal").dataset.userId;
     if (!userId) return;

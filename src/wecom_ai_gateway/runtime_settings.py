@@ -129,6 +129,12 @@ SPECS: list[SettingSpec] = [
                 min=50, max=10000, unit="字符", description="单条长期记忆的最大长度。"),
     SettingSpec("max_presets_per_user", "content", "预设数量上限", "int", default=20,
                 min=1, max=100, unit="个", description="每个用户最多保存的预设数量。"),
+    SettingSpec("kb_enabled", "content", "启用知识库检索增强", "bool", default=False,
+                description="开启后模型回答前会检索用户知识库并注入上下文。"),
+    SettingSpec("kb_max_chunks", "content", "知识库注入块数", "int", default=3, min=1, max=10,
+                unit="块", description="每次回答最多注入的知识块数量。"),
+    SettingSpec("kb_chunk_chars", "content", "知识库分块长度（字符）", "int", default=800,
+                min=200, max=2000, unit="字符", description="知识库内容按该长度分块检索。"),
     SettingSpec("max_providers_per_user", "content", "BYOK 供应商上限", "int", default=5,
                 min=1, max=20, unit="个", description="每个用户最多可添加的自带密钥供应商。"),
     # ---------- 6. 媒体 ----------
