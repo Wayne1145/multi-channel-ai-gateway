@@ -25,6 +25,7 @@ class RoutedCompletion:
     completion_tokens: int = 0
     group_id: str | None = None
     route_id: str | None = None
+    tool_calls: list | None = None
 
 
 def _is_failover_error(exc: Exception) -> bool:
@@ -69,6 +70,7 @@ async def complete_with_routing(
     max_tokens: int,
     timeout: float,
     group_id: str | None = None,
+    tools: list[dict] | None = None,
 ) -> RoutedCompletion:
     """使用默认模型组完成请求；可重试错误按优先级切到下一条路由。"""
     routes = active_routes(db, group_id)
@@ -84,7 +86,13 @@ async def complete_with_routing(
                 platform_provider.base_url,
                 api_key,
                 timeout,
-            ).complete(messages, route.model, temperature, max_tokens)
+            ).complete(
+                messages,
+                route.model,
+                temperature,
+                max_tokens,
+                tools=tools,
+            )
             return RoutedCompletion(
                 content=result.content,
                 provider_name=platform_provider.name,
@@ -94,6 +102,7 @@ async def complete_with_routing(
                 completion_tokens=result.completion_tokens,
                 group_id=group.id,
                 route_id=route.id,
+                tool_calls=result.tool_calls,
             )
         except Exception as exc:
             if not _is_failover_error(exc):

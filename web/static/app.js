@@ -723,12 +723,12 @@
 
   /* ---------- 平台设置 ---------- */
   const SETTING_GROUPS = {
-    general: "基础与公告", model: "模型与供应商", account: "用户与账号",
+    general: "基础与公告", model: "模型与供应商", tool: "受限工具", account: "用户与账号",
     quota: "用量与限额", content: "消息与内容", media: "媒体",
     task: "任务与可靠性", channel: "渠道与 ClawBot", retention: "数据保留",
     alert: "告警",
   };
-  const groupOrder = ["general", "model", "account", "quota", "content", "media", "task", "channel", "retention", "alert"];
+  const groupOrder = ["general", "model", "tool", "account", "quota", "content", "media", "task", "channel", "retention", "alert"];
   let settingsState = [];
 
   function settingInputHtml(s) {

@@ -94,7 +94,7 @@ def test_secret_without_env_shows_unconfigured(db):
 def test_specs_are_well_formed():
     for spec in SPEC_BY_KEY.values():
         assert spec.key
-        assert spec.group in {"general", "model", "account", "quota", "content", "media", "task", "channel", "retention", "alert"}
+        assert spec.group in {"general", "model", "tool", "account", "quota", "content", "media", "task", "channel", "retention", "alert"}
         assert spec.label
         assert spec.type in {"int", "float", "bool", "str", "select", "secret"}
         if spec.type == "select":

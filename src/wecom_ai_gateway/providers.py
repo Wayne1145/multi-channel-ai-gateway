@@ -10,6 +10,14 @@ class CompletionResult:
     content: str
     prompt_tokens: int = 0
     completion_tokens: int = 0
+    tool_calls: list["ToolCall"] | None = None
+
+
+@dataclass(frozen=True)
+class ToolCall:
+    id: str
+    name: str
+    arguments: str
 
 
 class RetryableProviderError(RuntimeError):
@@ -30,7 +38,13 @@ class OpenAICompatibleProvider:
         self._timeout = timeout if timeout is not None else settings.request_timeout_seconds
 
     async def complete(
-        self, messages: list[dict], model: str, temperature: float, max_tokens: int
+        self,
+        messages: list[dict],
+        model: str,
+        temperature: float,
+        max_tokens: int,
+        *,
+        tools: list[dict] | None = None,
     ) -> CompletionResult:
         if not self._api_key:
             raise RuntimeError("未配置模型 API Key")
@@ -42,6 +56,9 @@ class OpenAICompatibleProvider:
             "max_tokens": max_tokens,
             "stream": False,
         }
+        if tools:
+            payload["tools"] = tools
+            payload["tool_choice"] = "auto"
         async with httpx.AsyncClient(timeout=self._timeout) as client:
             r = await client.post(
                 self._base_url + "/chat/completions",
@@ -56,15 +73,33 @@ class OpenAICompatibleProvider:
             raise RetryableProviderError("模型响应缺少可用候选内容")
         message = choices[0].get("message") or {}
         content = message.get("content")
+        parsed_tool_calls: list[ToolCall] = []
+        for raw_call in message.get("tool_calls") or []:
+            if not isinstance(raw_call, dict) or raw_call.get("type") != "function":
+                continue
+            function = raw_call.get("function") or {}
+            call_id = raw_call.get("id")
+            name = function.get("name")
+            arguments = function.get("arguments")
+            if (
+                all(isinstance(item, str) and item for item in (call_id, name, arguments))
+                and len(call_id) <= 200
+                and len(name) <= 80
+                and len(arguments) <= 4000
+            ):
+                parsed_tool_calls.append(
+                    ToolCall(id=call_id, name=name, arguments=arguments)
+                )
         # 部分兼容供应商会在较长推理仍未产出最终文本时返回空 content。
         # 这不是可发送的客服回复：抛出可重试错误，让 Outbox 按退避策略等待，
         # 而不是把“暂时没有生成可发送的内容”发给用户。
-        if not isinstance(content, str) or not content.strip():
+        if (not isinstance(content, str) or not content.strip()) and not parsed_tool_calls:
             raise RetryableProviderError("模型尚未生成可发送的最终内容")
         return CompletionResult(
-            content=content.strip(),
+            content=content.strip() if isinstance(content, str) else "",
             prompt_tokens=int(usage.get("prompt_tokens", 0)),
             completion_tokens=int(usage.get("completion_tokens", 0)),
+            tool_calls=parsed_tool_calls,
         )
 
 

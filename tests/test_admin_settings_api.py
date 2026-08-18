@@ -38,6 +38,33 @@ def test_admin_settings_get_returns_groups_and_secret_redaction():
     assert "sk-" not in str(response.json())
 
 
+def test_admin_tool_catalog_is_read_only_and_reflects_runtime_settings(db):
+    update_settings(
+        db,
+        {
+            "tools_enabled": True,
+            "tools_allowed": "get_weather",
+            "tool_max_calls": 2,
+            "tool_timeout_seconds": 7,
+        },
+    )
+    assert client.get("/api/admin/tools").status_code == 401
+
+    response = client.get("/api/admin/tools", headers=ADMIN_HEADERS)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["enabled"] is True
+    assert body["allowed"] == ["get_weather"]
+    assert body["max_calls"] == 2
+    assert body["timeout_seconds"] == 7
+    assert {item["name"] for item in body["catalog"]} == {
+        "get_current_time",
+        "get_weather",
+    }
+    assert all(item["read_only"] is True for item in body["catalog"])
+
+
 def test_admin_settings_put_validates_and_rejects_bad_values():
     bad = client.put(
         "/api/admin/settings",

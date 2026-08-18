@@ -83,6 +83,7 @@ from .runtime_settings import (
 from .security import decrypt_secret, encrypt_secret, hash_password, verify_admin_token
 from .services import ingest_channel_message, quota_status
 from .tasks import replay_task
+from .tool_execution import available_tool_names, parse_tool_allowlist
 from .wecom import decrypt, parse_callback, verify_signature
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -667,6 +668,25 @@ def admin_set_user_model_group(
 @app.get("/api/admin/settings", dependencies=[Depends(admin)])
 def admin_settings(db: Session = Depends(db_dep)):
     return {"settings": settings_view(db)}
+
+
+@app.get("/api/admin/tools", dependencies=[Depends(admin)])
+def admin_tools(db: Session = Depends(db_dep)):
+    labels = {
+        "get_current_time": "当前日期与时间",
+        "get_weather": "当前天气与短期预报",
+    }
+    allowed = parse_tool_allowlist(str(get_runtime_value(db, "tools_allowed")))
+    return {
+        "enabled": bool(get_runtime_value(db, "tools_enabled")),
+        "allowed": sorted(allowed),
+        "max_calls": int(get_runtime_value(db, "tool_max_calls")),
+        "timeout_seconds": int(get_runtime_value(db, "tool_timeout_seconds")),
+        "catalog": [
+            {"name": name, "label": labels[name], "read_only": True}
+            for name in sorted(available_tool_names())
+        ],
+    }
 
 
 @app.put("/api/admin/settings", dependencies=[Depends(admin)])

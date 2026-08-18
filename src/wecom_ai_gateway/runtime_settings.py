@@ -77,6 +77,18 @@ SPECS: list[SettingSpec] = [
     SettingSpec("unconfigured_model_message", "model", "模型未配置提示", "str",
                 env_attr="unconfigured_model_message", max=500,
                 description="平台未配置模型凭据时返回给用户的提示。"),
+    # ---------- 2.1 受限工具执行 ----------
+    SettingSpec("tools_enabled", "tool", "启用受限工具执行", "bool", default=False,
+                description="默认关闭。开启后模型只能调用下方白名单中的只读工具。"),
+    SettingSpec("tools_allowed", "tool", "工具白名单", "str",
+                default="get_current_time,get_weather", max=500,
+                description="逗号分隔；仅接受内置工具 get_current_time/get_weather。"),
+    SettingSpec("tool_max_calls", "tool", "单次消息工具调用上限", "int", default=3,
+                min=1, max=10, unit="次",
+                description="限制模型循环调用，达到上限立即停止。"),
+    SettingSpec("tool_timeout_seconds", "tool", "单个工具超时（秒）", "int", default=10,
+                min=1, max=60, unit="秒",
+                description="天气等外部只读工具的最长执行时间。"),
     # ---------- 3. 用户与账号 ----------
     SettingSpec("allow_public_registration", "account", "开放公开注册", "bool",
                 env_attr="allow_public_registration",
@@ -406,6 +418,10 @@ def update_settings(db: Session, values: dict[str, Any]) -> dict[str, str]:
             continue  # 留空表示不修改
         try:
             value = _coerce(raw, spec)
+            if key == "tools_allowed":
+                from .tool_execution import parse_tool_allowlist
+
+                parse_tool_allowlist(value)
         except ValueError as exc:
             errors[key] = str(exc)
             continue

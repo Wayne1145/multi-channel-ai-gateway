@@ -83,3 +83,12 @@ def test_model_routing_view_and_user_assignment_wiring():
     # 平台密钥只能从密码输入框写入，不得渲染任何密钥值或密文字段。
     assert 'id="model-provider-key" type="password"' in html
     assert "api_key_encrypted" not in js
+
+
+def test_restricted_tool_settings_group_is_wired():
+    html = (ROOT / "web/index.html").read_text(encoding="utf-8")
+    js = (ROOT / "web/static/app.js").read_text(encoding="utf-8")
+
+    assert "/static/app.js?v=9" in html
+    assert 'tool: "受限工具"' in js
+    assert '"tool"' in js
