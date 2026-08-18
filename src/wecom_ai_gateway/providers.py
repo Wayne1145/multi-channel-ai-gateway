@@ -12,6 +12,10 @@ class CompletionResult:
     completion_tokens: int = 0
 
 
+class RetryableProviderError(RuntimeError):
+    """供应商已响应但没有可发送结果；允许模型组切换备用线路。"""
+
+
 class OpenAICompatibleProvider:
     """OpenAI 兼容供应商。base_url/api_key 可覆盖（用户 BYOK 时注入解密后的值）。"""
 
@@ -49,14 +53,14 @@ class OpenAICompatibleProvider:
         usage = data.get("usage") or {}
         choices = data.get("choices") or []
         if not choices or not isinstance(choices[0], dict):
-            raise RuntimeError("模型响应缺少可用候选内容")
+            raise RetryableProviderError("模型响应缺少可用候选内容")
         message = choices[0].get("message") or {}
         content = message.get("content")
         # 部分兼容供应商会在较长推理仍未产出最终文本时返回空 content。
         # 这不是可发送的客服回复：抛出可重试错误，让 Outbox 按退避策略等待，
         # 而不是把“暂时没有生成可发送的内容”发给用户。
         if not isinstance(content, str) or not content.strip():
-            raise RuntimeError("模型尚未生成可发送的最终内容")
+            raise RetryableProviderError("模型尚未生成可发送的最终内容")
         return CompletionResult(
             content=content.strip(),
             prompt_tokens=int(usage.get("prompt_tokens", 0)),

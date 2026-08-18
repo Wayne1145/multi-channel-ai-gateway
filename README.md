@@ -13,7 +13,7 @@
 - 有限重试、指数退避、死信、人工重放和遗留任务补偿
 - 客服账号同步锁与消息处理锁
 - PostgreSQL 数据持久化及 Alembic 迁移
-- OpenAI-compatible 模型接口；未配置 API Key 时仍可运行网关、命令系统和管理后台，并向普通消息返回维护提示
+- OpenAI-compatible 模型接口；平台供应商 + 有序模型组支持超时、限流和 5xx 串行故障切换，可按用户分配模型组；未建组时兼容原 `.env` 单线路
 - 双管理模式：用户自足（self_service）/ 统一管理（managed），支持按用户覆盖；`.env` 可开启全局单用户模式
 - 角色卡系统：每用户多槽位，SOUL.md（OpenClaw 标准）与 SillyTavern v2/v3 JSON 双格式，内容加密存储、管理员不可读
 - 指令策略三级覆盖（平台 → 渠道 → 用户），支持静默禁用（redirect_to_ai / ignore 两种处理）
@@ -26,7 +26,7 @@
 - 每用户独立身份、会话、模型、人设和参数
 - 私有长期记忆（默认关闭）
 - 每日 Token 配额
-- 管理 API 与 Apple 风格管理后台：双角色账号中心、用户管理（渠道身份脱敏/显示名/封禁/模式）、平台设置、审计日志、渠道实例、死信重放
+- 管理 API 与 Apple 风格管理后台：双角色账号中心、用户管理（渠道身份脱敏/显示名/封禁/模式/模型组）、模型路由、平台设置、审计日志、渠道实例、死信重放
 - Docker Compose / 1Panel 友好部署
 - 可选 `wechat_clawbot` Bridge：仓库内置可独立部署的 iLink 桥接，文本与媒体收发（CDN AES 加密上传），多实例会话加密隔离；登录凭据由 Bridge 保管，网关仅处理规范化消息
 
@@ -104,7 +104,8 @@ python3 -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().
 ## 安全边界
 
 - 原始 `external_userid` 使用 Fernet 加密，检索使用 HMAC-SHA256。
-- 模型密钥和企业微信 Secret 只从环境变量读取。
+- 企业微信 Secret 只从环境变量读取；平台模型密钥可由管理员写入数据库，使用 Fernet 加密，API 与后台永不回显。
+- BYOK 与平台密钥严格隔离：失效 BYOK 不会静默回退并混用平台凭据。
 - `.env`、数据库、日志和上传文件不会进入 Git。
 - 管理 API 需要 `X-Admin-Token`。
 - 长期记忆默认关闭，并只能由当前用户管理。

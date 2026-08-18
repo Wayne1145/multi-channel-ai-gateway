@@ -239,6 +239,7 @@ def resolve_provider(db, user_settings: UserSettings):
                 )
             except Exception:
                 log.exception("解密用户 BYOK 密钥失败 user=%s", user_settings.user_id)
+        raise RuntimeError("用户 BYOK 配置已失效，请重新选择或配置供应商")
     return (
         settings.default_provider,
         settings.openai_compatible_base_url,
@@ -456,9 +457,19 @@ async def process_message(message_id: str) -> None:
 
 
 async def _complete_ai(db, row: Message, conversation: Conversation, user_settings: UserSettings) -> str:
-    # 未配置模型凭据时保持网关可用，并向用户返回明确状态，而不是制造失败任务。
+    # BYOK 始终直连用户自己的供应商；其余用户优先走平台默认模型组，
+    # 未配置模型组时兼容回退到原有 .env 单供应商。
     provider_name, base_url, api_key = resolve_provider(db, user_settings)
-    if not api_key:
+    is_byok = bool((user_settings.provider_key or "").startswith("byok:"))
+    from .model_routing import active_routes
+
+    selected_group_id = user_settings.model_group_id
+    selected_routes = active_routes(db, selected_group_id) if selected_group_id else active_routes(db)
+    if selected_group_id and not selected_routes:
+        selected_group_id = None
+        selected_routes = active_routes(db)
+    use_model_group = not is_byok and bool(selected_routes)
+    if not use_model_group and not api_key:
         return settings.unconfigured_model_message
 
     status = quota_status(db, row.user_id, user_settings)
@@ -529,17 +540,30 @@ async def _complete_ai(db, row: Message, conversation: Conversation, user_settin
         for message in history
     )
     model = user_settings.model or settings.default_model
-    result = await provider_for(
-        provider_name,
-        base_url,
-        api_key,
-        timeout=float(get_runtime_value(db, "request_timeout_seconds")),
-    ).complete(
-        prompts,
-        model,
-        user_settings.temperature if user_settings.temperature is not None else 0.7,
-        user_settings.max_tokens or int(get_runtime_value(db, "default_max_tokens")),
-    )
+    temperature = user_settings.temperature if user_settings.temperature is not None else 0.7
+    max_tokens = user_settings.max_tokens or int(get_runtime_value(db, "default_max_tokens"))
+    timeout = float(get_runtime_value(db, "request_timeout_seconds"))
+    if use_model_group:
+        from .model_routing import complete_with_routing
+
+        result = await complete_with_routing(
+            db,
+            user_settings,
+            prompts,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            timeout=timeout,
+            group_id=selected_group_id,
+        )
+        provider_name = result.provider_name
+        model = result.model
+    else:
+        result = await provider_for(
+            provider_name,
+            base_url,
+            api_key,
+            timeout=timeout,
+        ).complete(prompts, model, temperature, max_tokens)
     db.add(
         UsageRecord(
             user_id=row.user_id,

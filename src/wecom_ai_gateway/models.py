@@ -115,6 +115,10 @@ class UserSettings(Base):
     )
     # 当前生效供应商：NULL/空=平台默认，byok:<provider_id>=用户自带
     provider_key: Mapped[str | None] = mapped_column(String(120))
+    # 可选的平台模型组；NULL=使用平台默认组，组删除后自动回退。
+    model_group_id: Mapped[str | None] = mapped_column(
+        ForeignKey("model_groups.id", ondelete="SET NULL"), index=True
+    )
 
 
 class Conversation(Base):
@@ -303,6 +307,68 @@ class UserProvider(Base):
     api_key_encrypted: Mapped[str] = mapped_column(Text)
     models: Mapped[list] = mapped_column(JSON, default=list)
     is_default: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class PlatformProvider(Base):
+    """管理员维护的平台模型供应商；密钥只以加密形式落库。"""
+
+    __tablename__ = "platform_providers"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    name: Mapped[str] = mapped_column(String(120), unique=True)
+    provider_key: Mapped[str] = mapped_column(String(40), default="openai-compatible")
+    base_url: Mapped[str] = mapped_column(String(500))
+    api_key_encrypted: Mapped[str] = mapped_column(Text)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class ModelGroup(Base):
+    """一组按优先级依次尝试的模型路由。"""
+
+    __tablename__ = "model_groups"
+    __table_args__ = (
+        Index(
+            "uq_model_groups_single_default",
+            "is_default",
+            unique=True,
+            postgresql_where=literal_column("is_default"),
+            sqlite_where=literal_column("is_default = 1"),
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    name: Mapped[str] = mapped_column(String(120), unique=True)
+    is_default: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class ModelRoute(Base):
+    """模型组中的单条供应商路由；priority 越小越先尝试。"""
+
+    __tablename__ = "model_routes"
+    __table_args__ = (
+        UniqueConstraint("group_id", "provider_id", "model", name="uq_model_route_target"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    group_id: Mapped[str] = mapped_column(
+        ForeignKey("model_groups.id", ondelete="CASCADE"), index=True
+    )
+    provider_id: Mapped[str] = mapped_column(
+        ForeignKey("platform_providers.id", ondelete="CASCADE"), index=True
+    )
+    model: Mapped[str] = mapped_column(String(160))
+    priority: Mapped[int] = mapped_column(Integer, default=100)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()

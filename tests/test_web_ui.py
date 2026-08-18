@@ -63,3 +63,23 @@ def test_settings_view_navigation_and_save_wiring():
     assert "/display-name" in js
     # 角色卡内容预览
     assert "content_preview" in js
+
+
+def test_model_routing_view_and_user_assignment_wiring():
+    html = (ROOT / "web/index.html").read_text(encoding="utf-8")
+    js = (ROOT / "web/static/app.js").read_text(encoding="utf-8")
+
+    assert 'data-view="model-routing"' in html
+    assert 'id="view-model-routing"' in html
+    assert 'id="model-provider-tbody"' in html
+    assert 'id="model-group-list"' in html
+    assert 'id="model-group-modal"' in html
+    assert 'id="user-model-group"' in html
+    assert 'id="user-model-group-save"' in html
+    assert '"/api/admin/model-providers"' in js
+    assert '"/api/admin/model-groups"' in js
+    assert "/model-group" in js
+    assert "/test" in js
+    # 平台密钥只能从密码输入框写入，不得渲染任何密钥值或密文字段。
+    assert 'id="model-provider-key" type="password"' in html
+    assert "api_key_encrypted" not in js

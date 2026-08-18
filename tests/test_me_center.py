@@ -148,6 +148,31 @@ def test_provider_count_limit(db):
     assert second.status_code == 400
 
 
+def test_deleting_selected_byok_clears_user_provider_choice(db):
+    user_id, token = _login("byokdelete")
+    created = client.post(
+        "/api/me/providers",
+        headers=_headers(token),
+        json={
+            "provider_key": "openai-compatible",
+            "base_url": "https://delete.example/v1",
+            "api_key": "private-key",
+        },
+    ).json()
+    db = SessionLocal()
+    settings_row = db.get(UserSettings, user_id)
+    settings_row.provider_key = f"byok:{created['id']}"
+    db.commit()
+    db.close()
+
+    assert client.delete(
+        f"/api/me/providers/{created['id']}", headers=_headers(token)
+    ).status_code == 200
+    db = SessionLocal()
+    assert db.get(UserSettings, user_id).provider_key is None
+    db.close()
+
+
 def test_password_change_revokes_other_sessions(db):
     _, token = _login("passuser")
     db = SessionLocal()

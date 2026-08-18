@@ -53,6 +53,10 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4M5 5l2.5 2.5M16.5 16.5 19 19M19 5l-2.5 2.5M7.5 16.5 5 19"/></svg>
         死信任务
       </button>
+      <button class="nav-item admin-only" data-view="model-routing">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="12" r="2"/><circle cx="19" cy="6" r="2"/><circle cx="19" cy="18" r="2"/><path d="M7 12h4a4 4 0 0 0 4-4M7 12h4a4 4 0 0 1 4 4"/></svg>
+        模型路由
+      </button>
       <button class="nav-item" data-view="me-settings">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="3.6"/><path d="M5 20c.7-3.8 3.3-5.6 7-5.6s6.3 1.8 7 5.6"/></svg>
         我的设置
@@ -206,6 +210,28 @@
         </div>
       </div>
     </section>
+    <section id="view-model-routing" class="view hidden">
+      <div class="card">
+        <div class="card-head"><h2>平台供应商</h2><span class="muted small">密钥加密存储，保存后不回显</span></div>
+        <div class="me-toolbar">
+          <input id="model-provider-name" class="field" placeholder="供应商名称" style="width:170px">
+          <input id="model-provider-url" class="field" placeholder="https://api.example.com/v1" style="width:260px">
+          <input id="model-provider-key" type="password" class="field" placeholder="API Key" style="width:200px" autocomplete="new-password">
+          <button id="model-provider-add" class="btn btn-sm btn-primary">添加供应商</button>
+        </div>
+        <div class="table-wrap">
+          <table class="table">
+            <thead><tr><th>名称</th><th>类型</th><th>Base URL</th><th>密钥</th><th>状态</th><th></th></tr></thead>
+            <tbody id="model-provider-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-head"><h2>模型组与故障切换</h2><button id="model-group-new" class="btn btn-sm btn-primary">新建模型组</button></div>
+        <p class="muted small">优先级数字越小越先调用；主线路发生超时、限流或 5xx 时按顺序切换。401/403 等配置错误不会被备用线路掩盖。</p>
+        <div id="model-group-list" class="settings-groups"></div>
+      </div>
+    </section>
     <section id="view-me-settings" class="view hidden">
       <div class="card">
         <div class="card-head"><h2>我的设置</h2></div>
@@ -309,6 +335,21 @@
 
 <div id="toast" class="toast hidden"></div>
 
+<!-- 模型组编辑弹窗 -->
+<div id="model-group-modal" class="modal-mask hidden">
+  <div class="modal modal-lg">
+    <div class="modal-head"><h2 id="model-group-modal-title">新建模型组</h2><button id="model-group-close" class="btn btn-ghost btn-sm">关闭</button></div>
+    <input id="model-group-name" class="field" placeholder="模型组名称" style="width:100%">
+    <label class="setting-row" style="margin-top:12px"><span><b>设为默认组</b><small>非 BYOK 用户优先使用此组</small></span><span class="switch"><input id="model-group-default" type="checkbox"><span class="switch-slider"></span></span></label>
+    <label class="setting-row"><span><b>启用模型组</b></span><span class="switch"><input id="model-group-enabled" type="checkbox" checked><span class="switch-slider"></span></span></label>
+    <div class="modal-section">
+      <div class="card-head"><h3>路由</h3><button id="model-route-add" class="btn btn-sm">添加路由</button></div>
+      <div id="model-route-editor"></div>
+    </div>
+    <div class="me-toolbar"><button id="model-group-save" class="btn btn-primary">保存模型组</button></div>
+  </div>
+</div>
+
 <!-- 微信扫码登录弹窗 -->
 <div id="qrcode-modal" class="modal-mask hidden">
   <div class="modal qrcode-modal">
@@ -337,6 +378,14 @@
         <button id="display-name-save" class="btn btn-sm btn-primary">保存</button>
       </div>
       <p class="muted small">用于后台识别该用户；未设置时显示渠道身份脱敏值。</p>
+    </div>
+    <div class="modal-section">
+      <h3>平台模型组</h3>
+      <div class="filters">
+        <select id="user-model-group" class="field field-sm" style="flex:1"><option value="">跟随平台默认组</option></select>
+        <button id="user-model-group-save" class="btn btn-sm btn-primary">保存分配</button>
+      </div>
+      <p class="muted small">BYOK 用户仍优先使用自己的供应商；清空后跟随平台默认组。</p>
     </div>
     <div class="modal-section">
       <div class="modal-section">
@@ -397,6 +446,6 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=6"></script>
+<script src="/static/app.js?v=8"></script>
 </body>
 </html>

@@ -118,11 +118,11 @@ def test_byok_provider_must_belong_to_requesting_user(db):
     db.flush()
     requester_settings.provider_key = f"byok:{provider.id}"
 
-    with patch("wecom_ai_gateway.services.settings.openai_compatible_api_key", "platform-secret"):
-        resolved = resolve_provider(db, requester_settings)
-
-    assert resolved[2] == "platform-secret"
-    assert resolved[2] != "owner-secret"
+    with (
+        patch("wecom_ai_gateway.services.settings.openai_compatible_api_key", "platform-secret"),
+        pytest.raises(RuntimeError, match="BYOK 配置已失效"),
+    ):
+        resolve_provider(db, requester_settings)
 
 
 def test_preset_cannot_activate_another_users_card(db):

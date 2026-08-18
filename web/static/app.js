@@ -46,6 +46,7 @@
   const TITLES = {
     dashboard: "仪表盘", users: "用户", instances: "渠道实例",
     media: "媒体审计", messages: "消息", tasks: "死信任务", audit: "审计日志", settings: "平台设置",
+    "model-routing": "模型路由",
     "me-settings": "我的设置",
   };
   function switchView(name) {
@@ -60,6 +61,7 @@
     if (name === "media") loadMedia();
     if (name === "messages") loadMessages();
     if (name === "tasks") loadTasks();
+    if (name === "model-routing") loadModelRouting();
     if (name === "audit") loadAuditLogs();
     if (name === "settings") loadSettings();
     if (name === "me-settings") loadMySettings();
@@ -287,18 +289,23 @@
   /* ---------- 用户详情（管理端不可读内容） ---------- */
   async function openUserDetail(userId, name, accountUsername) {
     try {
-      const [cards, presets, providers, policies, detail] = await Promise.all([
+      const [cards, presets, providers, policies, detail, groups] = await Promise.all([
         api(`/api/admin/users/${userId}/cards`),
         api(`/api/admin/users/${userId}/presets`),
         api(`/api/admin/users/${userId}/providers`),
         api(`/api/admin/users/${userId}/policies`),
         api(`/api/admin/users/${userId}/detail`),
+        api("/api/admin/model-groups"),
       ]);
       $("user-modal-title").textContent = `用户详情 · ${name}`;
       $("user-modal").dataset.userId = userId;
       $("account-username").value = accountUsername || "";
       $("account-password").value = "";
       $("display-name-input-admin").value = (name && !name.startsWith("未命名") && name !== "(未命名)") ? name : "";
+      const user = (await api("/api/admin/users?limit=200")).find((item) => item.id === userId);
+      $("user-model-group").innerHTML = '<option value="">跟随平台默认组</option>' + groups
+        .filter((g) => g.enabled)
+        .map((g) => `<option value="${g.id}" ${user?.model_group_id === g.id ? "selected" : ""}>${esc(g.name)}${g.is_default ? "（平台默认）" : ""}</option>`).join("");
       loadAdminSessions(userId);
       $("user-detail-grid").innerHTML = [
         ["会话数", detail.conversations],
@@ -368,6 +375,18 @@
       $("account-password").value = "";
       toast("登录账号已分配或重置");
       loadUsers();
+    } catch (ex) { toast(ex.message, true); }
+  });
+  $("user-model-group-save").addEventListener("click", async () => {
+    const userId = $("user-modal").dataset.userId;
+    if (!userId) return;
+    try {
+      await api(`/api/admin/users/${userId}/model-group`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model_group_id: $("user-model-group").value || null }),
+      });
+      toast("用户模型组已更新"); loadUsers();
     } catch (ex) { toast(ex.message, true); }
   });
   $("user-modal-close").addEventListener("click", () => $("user-modal").classList.add("hidden"));
@@ -563,6 +582,144 @@
       toast(ex.message, true);
     }
   }
+
+  /* ---------- 模型供应商与故障切换 ---------- */
+  let modelProviders = [];
+  let modelGroups = [];
+
+  async function loadModelRouting() {
+    try {
+      [modelProviders, modelGroups] = await Promise.all([
+        api("/api/admin/model-providers"),
+        api("/api/admin/model-groups"),
+      ]);
+      renderModelProviders();
+      renderModelGroups();
+    } catch (ex) { toast(ex.message, true); }
+  }
+
+  function renderModelProviders() {
+    $("model-provider-tbody").innerHTML = modelProviders.length
+      ? modelProviders.map((p) => `
+          <tr>
+            <td>${esc(p.name)}</td>
+            <td class="mono small">${esc(p.provider_key)}</td>
+            <td class="text-clip" title="${esc(p.base_url)}">${esc(p.base_url)}</td>
+            <td><span class="badge ${p.api_key_configured ? "badge-ok" : "badge-dead"}">${p.api_key_configured ? "已配置" : "未配置"}</span></td>
+            <td><button class="btn btn-sm" data-model-provider-toggle="${p.id}" data-enabled="${p.enabled ? "0" : "1"}">${p.enabled ? "停用" : "启用"}</button></td>
+            <td><button class="btn btn-sm btn-danger" data-model-provider-delete="${p.id}">删除</button></td>
+          </tr>`).join("")
+      : '<tr><td colspan="6" class="muted">暂无平台供应商；未建模型组时继续使用 .env 兼容线路</td></tr>';
+    document.querySelectorAll("[data-model-provider-toggle]").forEach((b) =>
+      b.addEventListener("click", async () => {
+        await api(`/api/admin/model-providers/${b.dataset.modelProviderToggle}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ enabled: b.dataset.enabled === "1" }),
+        });
+        toast("供应商状态已更新"); loadModelRouting();
+      }));
+    document.querySelectorAll("[data-model-provider-delete]").forEach((b) =>
+      b.addEventListener("click", async () => {
+        if (!window.confirm("确认删除该供应商？引用它的路由会一并删除。")) return;
+        await api(`/api/admin/model-providers/${b.dataset.modelProviderDelete}`, { method: "DELETE" });
+        toast("供应商已删除"); loadModelRouting();
+      }));
+  }
+
+  function renderModelGroups() {
+    $("model-group-list").innerHTML = modelGroups.length
+      ? modelGroups.map((g) => `
+          <div class="settings-group">
+            <div class="card-head">
+              <h3>${esc(g.name)} ${g.is_default ? '<span class="badge badge-ok">默认</span>' : ""} ${g.enabled ? "" : '<span class="badge">停用</span>'}</h3>
+              <div class="me-actions"><button class="btn btn-sm" data-model-group-test="${g.id}">测试</button><button class="btn btn-sm" data-model-group-edit="${g.id}">编辑</button><button class="btn btn-sm btn-danger" data-model-group-delete="${g.id}">删除</button></div>
+            </div>
+            ${(g.routes || []).length ? g.routes.map((r, i) => `
+              <div class="settings-item">
+                <div class="settings-info"><div class="settings-label">${i + 1}. ${esc(r.provider_name)} → ${esc(r.model)}</div><div class="settings-desc">优先级 ${r.priority}${!r.enabled || !r.provider_enabled ? " · 当前不可用" : ""}</div></div>
+                <span class="badge ${r.enabled && r.provider_enabled ? "badge-ok" : ""}">${r.enabled && r.provider_enabled ? "可用" : "停用"}</span>
+              </div>`).join("") : '<p class="muted small">此组暂无路由，不会接管模型请求。</p>'}
+          </div>`).join("")
+      : '<div class="settings-group"><p class="muted">暂无模型组。现有 .env 单供应商仍正常工作。</p></div>';
+    document.querySelectorAll("[data-model-group-edit]").forEach((b) =>
+      b.addEventListener("click", () => openModelGroup(modelGroups.find((g) => g.id === b.dataset.modelGroupEdit))));
+    document.querySelectorAll("[data-model-group-test]").forEach((b) =>
+      b.addEventListener("click", async () => {
+        b.disabled = true;
+        try {
+          const result = await api(`/api/admin/model-groups/${b.dataset.modelGroupTest}/test`, { method: "POST" });
+          toast(`测试通过：${result.provider_name} / ${result.model} · ${result.latency_ms}ms`);
+        } catch (ex) { toast(ex.message, true); }
+        finally { b.disabled = false; }
+      }));
+    document.querySelectorAll("[data-model-group-delete]").forEach((b) =>
+      b.addEventListener("click", async () => {
+        if (!window.confirm("确认删除该模型组？")) return;
+        await api(`/api/admin/model-groups/${b.dataset.modelGroupDelete}`, { method: "DELETE" });
+        toast("模型组已删除"); loadModelRouting();
+      }));
+  }
+
+  function routeEditorRow(route = {}) {
+    const options = modelProviders.map((p) => `<option value="${p.id}" ${route.provider_id === p.id ? "selected" : ""}>${esc(p.name)}${p.enabled ? "" : "（停用）"}</option>`).join("");
+    return `<div class="me-toolbar model-route-row">
+      <select class="field route-provider" style="min-width:170px"><option value="">选择供应商</option>${options}</select>
+      <input class="field route-model" placeholder="模型名" value="${esc(route.model || "")}" style="min-width:180px">
+      <input class="field route-priority" type="number" min="0" max="10000" value="${Number(route.priority ?? 100)}" style="width:100px">
+      <label class="small"><input class="route-enabled" type="checkbox" ${route.enabled === false ? "" : "checked"}> 启用</label>
+      <button class="btn btn-sm btn-danger route-remove">移除</button>
+    </div>`;
+  }
+
+  function bindRouteRemove() {
+    document.querySelectorAll(".route-remove").forEach((b) =>
+      b.addEventListener("click", () => b.closest(".model-route-row").remove()));
+  }
+
+  function openModelGroup(group = null) {
+    $("model-group-modal").dataset.groupId = group?.id || "";
+    $("model-group-modal-title").textContent = group ? "编辑模型组" : "新建模型组";
+    $("model-group-name").value = group?.name || "";
+    $("model-group-default").checked = Boolean(group?.is_default);
+    $("model-group-enabled").checked = group ? Boolean(group.enabled) : true;
+    $("model-route-editor").innerHTML = (group?.routes || []).map(routeEditorRow).join("");
+    bindRouteRemove();
+    $("model-group-modal").classList.remove("hidden");
+  }
+
+  $("model-provider-add").addEventListener("click", async () => {
+    const body = {
+      name: $("model-provider-name").value.trim(),
+      provider_key: "openai-compatible",
+      base_url: $("model-provider-url").value.trim(),
+      api_key: $("model-provider-key").value,
+    };
+    if (!body.name || !body.base_url || !body.api_key) return toast("请填写完整供应商信息", true);
+    await api("/api/admin/model-providers", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    $("model-provider-name").value = ""; $("model-provider-url").value = ""; $("model-provider-key").value = "";
+    toast("供应商已添加"); loadModelRouting();
+  });
+  $("model-group-new").addEventListener("click", () => openModelGroup());
+  $("model-group-close").addEventListener("click", () => $("model-group-modal").classList.add("hidden"));
+  $("model-group-modal").addEventListener("click", (e) => { if (e.target === $("model-group-modal")) $("model-group-modal").classList.add("hidden"); });
+  $("model-route-add").addEventListener("click", () => {
+    $("model-route-editor").insertAdjacentHTML("beforeend", routeEditorRow()); bindRouteRemove();
+  });
+  $("model-group-save").addEventListener("click", async () => {
+    const routes = [...document.querySelectorAll(".model-route-row")].map((row) => ({
+      provider_id: row.querySelector(".route-provider").value,
+      model: row.querySelector(".route-model").value.trim(),
+      priority: Number(row.querySelector(".route-priority").value),
+      enabled: row.querySelector(".route-enabled").checked,
+    }));
+    if (!$("model-group-name").value.trim()) return toast("请填写模型组名称", true);
+    if (routes.some((r) => !r.provider_id || !r.model)) return toast("请补全每条路由", true);
+    const body = { name: $("model-group-name").value.trim(), enabled: $("model-group-enabled").checked, is_default: $("model-group-default").checked, routes };
+    const id = $("model-group-modal").dataset.groupId;
+    await api(id ? `/api/admin/model-groups/${id}` : "/api/admin/model-groups", { method: id ? "PUT" : "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    $("model-group-modal").classList.add("hidden"); toast("模型组已保存"); loadModelRouting();
+  });
 
   /* ---------- 平台设置 ---------- */
   const SETTING_GROUPS = {

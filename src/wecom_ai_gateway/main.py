@@ -2,6 +2,7 @@ import logging
 from datetime import UTC, datetime, timedelta
 from io import BytesIO
 from pathlib import Path
+from time import perf_counter
 from typing import Literal
 from urllib.parse import urlsplit
 
@@ -42,6 +43,7 @@ from .config import settings
 from .db import SessionLocal, session_scope
 from .media import list_media_metadata
 from .migration import migrate_user_mode
+from .model_routing import complete_with_routing
 from .models import (
     Account,
     AuditLog,
@@ -55,9 +57,12 @@ from .models import (
     Memory,
     Message,
     MessageStatus,
+    ModelGroup,
+    ModelRoute,
     OutboxStatus,
     OutboxTask,
     PlatformConfig,
+    PlatformProvider,
     Preset,
     SettingOverride,
     UsageRecord,
@@ -75,7 +80,7 @@ from .runtime_settings import (
     settings_view,
     update_settings,
 )
-from .security import decrypt_secret, hash_password, verify_admin_token
+from .security import decrypt_secret, encrypt_secret, hash_password, verify_admin_token
 from .services import ingest_channel_message, quota_status
 from .tasks import replay_task
 from .wecom import decrypt, parse_callback, verify_signature
@@ -328,6 +333,335 @@ class SettingsUpdateIn(BaseModel):
 
 class DisplayNameIn(BaseModel):
     display_name: str
+
+
+class PlatformProviderIn(BaseModel):
+    name: str
+    provider_key: str = "openai-compatible"
+    base_url: str
+    api_key: str
+    enabled: bool = True
+
+
+class PlatformProviderUpdateIn(BaseModel):
+    name: str | None = None
+    provider_key: str | None = None
+    base_url: str | None = None
+    api_key: str | None = None
+    enabled: bool | None = None
+
+
+class ModelRouteIn(BaseModel):
+    provider_id: str
+    model: str
+    priority: int = 100
+    enabled: bool = True
+
+
+class ModelGroupIn(BaseModel):
+    name: str
+    enabled: bool = True
+    is_default: bool = False
+    routes: list[ModelRouteIn] = []
+
+
+class UserModelGroupIn(BaseModel):
+    model_group_id: str | None = None
+
+
+def _platform_provider_view(row: PlatformProvider) -> dict:
+    return {
+        "id": row.id,
+        "name": row.name,
+        "provider_key": row.provider_key,
+        "base_url": row.base_url,
+        "enabled": row.enabled,
+        "api_key_configured": bool(row.api_key_encrypted),
+        "created_at": row.created_at,
+        "updated_at": row.updated_at,
+    }
+
+
+def _model_group_view(db: Session, group: ModelGroup) -> dict:
+    rows = db.execute(
+        select(ModelRoute, PlatformProvider)
+        .join(PlatformProvider, PlatformProvider.id == ModelRoute.provider_id)
+        .where(ModelRoute.group_id == group.id)
+        .order_by(ModelRoute.priority, ModelRoute.created_at, ModelRoute.id)
+    ).all()
+    return {
+        "id": group.id,
+        "name": group.name,
+        "enabled": group.enabled,
+        "is_default": group.is_default,
+        "created_at": group.created_at,
+        "updated_at": group.updated_at,
+        "routes": [
+            {
+                "id": route.id,
+                "provider_id": provider.id,
+                "provider_name": provider.name,
+                "provider_enabled": provider.enabled,
+                "model": route.model,
+                "priority": route.priority,
+                "enabled": route.enabled,
+            }
+            for route, provider in rows
+        ],
+    }
+
+
+def _validate_provider_fields(name: str, provider_key: str, base_url: str) -> tuple[str, str, str]:
+    name = name.strip()[:120]
+    provider_key = provider_key.strip()[:40]
+    base_url = base_url.strip().rstrip("/")[:500]
+    if not name or not provider_key:
+        raise HTTPException(400, "name 与 provider_key 必填")
+    if provider_key != "openai-compatible":
+        raise HTTPException(400, "当前仅支持 openai-compatible")
+    parsed = urlsplit(base_url)
+    if parsed.scheme != "https" or not parsed.netloc or parsed.username or parsed.password:
+        raise HTTPException(400, "base_url 必须是无凭据的 https 地址")
+    return name, provider_key, base_url
+
+
+@app.get("/api/admin/model-providers", dependencies=[Depends(admin)])
+def admin_model_providers(db: Session = Depends(db_dep)):
+    rows = db.scalars(select(PlatformProvider).order_by(PlatformProvider.created_at))
+    return [_platform_provider_view(row) for row in rows]
+
+
+@app.post("/api/admin/model-providers", dependencies=[Depends(admin)])
+def admin_create_model_provider(body: PlatformProviderIn, db: Session = Depends(db_dep)):
+    name, provider_key, base_url = _validate_provider_fields(
+        body.name, body.provider_key, body.base_url
+    )
+    if not body.api_key.strip():
+        raise HTTPException(400, "api_key 必填")
+    if db.scalar(select(PlatformProvider.id).where(PlatformProvider.name == name)):
+        raise HTTPException(409, "供应商名称已存在")
+    row = PlatformProvider(
+        name=name,
+        provider_key=provider_key,
+        base_url=base_url,
+        api_key_encrypted=encrypt_secret(body.api_key.strip()),
+        enabled=body.enabled,
+    )
+    db.add(row)
+    db.flush()
+    db.add(AuditLog(action="model_provider.create", detail={"provider_id": row.id}))
+    db.commit()
+    db.refresh(row)
+    return _platform_provider_view(row)
+
+
+@app.put("/api/admin/model-providers/{provider_id}", dependencies=[Depends(admin)])
+def admin_update_model_provider(
+    provider_id: str,
+    body: PlatformProviderUpdateIn,
+    db: Session = Depends(db_dep),
+):
+    row = db.get(PlatformProvider, provider_id)
+    if not row:
+        raise HTTPException(404, "model provider not found")
+    name, provider_key, base_url = _validate_provider_fields(
+        body.name if body.name is not None else row.name,
+        body.provider_key if body.provider_key is not None else row.provider_key,
+        body.base_url if body.base_url is not None else row.base_url,
+    )
+    conflict = db.scalar(
+        select(PlatformProvider.id).where(
+            PlatformProvider.name == name, PlatformProvider.id != row.id
+        )
+    )
+    if conflict:
+        raise HTTPException(409, "供应商名称已存在")
+    row.name = name
+    row.provider_key = provider_key
+    row.base_url = base_url
+    if body.api_key is not None and body.api_key.strip():
+        row.api_key_encrypted = encrypt_secret(body.api_key.strip())
+    if body.enabled is not None:
+        row.enabled = body.enabled
+    db.add(AuditLog(action="model_provider.update", detail={"provider_id": row.id}))
+    db.commit()
+    db.refresh(row)
+    return _platform_provider_view(row)
+
+
+@app.delete("/api/admin/model-providers/{provider_id}", dependencies=[Depends(admin)])
+def admin_delete_model_provider(provider_id: str, db: Session = Depends(db_dep)):
+    row = db.get(PlatformProvider, provider_id)
+    if not row:
+        raise HTTPException(404, "model provider not found")
+    db.delete(row)
+    db.add(AuditLog(action="model_provider.delete", detail={"provider_id": provider_id}))
+    db.commit()
+    return {"ok": True}
+
+
+def _save_model_group(db: Session, group: ModelGroup, body: ModelGroupIn) -> None:
+    name = body.name.strip()[:120]
+    if not name:
+        raise HTTPException(400, "name 必填")
+    targets: set[tuple[str, str]] = set()
+    normalized: list[tuple[ModelRouteIn, str]] = []
+    for route in body.routes:
+        model = route.model.strip()[:160]
+        if not model or not db.get(PlatformProvider, route.provider_id):
+            raise HTTPException(400, "路由模型为空或供应商不存在")
+        target = (route.provider_id, model)
+        if target in targets:
+            raise HTTPException(400, "同一组内不能重复配置相同供应商与模型")
+        targets.add(target)
+        normalized.append((route, model))
+    conflict = db.scalar(
+        select(ModelGroup.id).where(ModelGroup.name == name, ModelGroup.id != group.id)
+    )
+    if conflict:
+        raise HTTPException(409, "模型组名称已存在")
+    group.name = name
+    group.enabled = body.enabled
+    if body.is_default:
+        db.execute(
+            ModelGroup.__table__.update()
+            .where(ModelGroup.id != group.id, ModelGroup.is_default.is_(True))
+            .values(is_default=False)
+        )
+        # 部分唯一索引要求事务内也不能瞬时出现两个默认组：先落旧组清理，再设新组。
+        db.flush()
+    group.is_default = body.is_default
+    db.execute(delete(ModelRoute).where(ModelRoute.group_id == group.id))
+    for route, model in normalized:
+        db.add(
+            ModelRoute(
+                group_id=group.id,
+                provider_id=route.provider_id,
+                model=model,
+                priority=max(0, min(route.priority, 10000)),
+                enabled=route.enabled,
+            )
+        )
+
+
+@app.get("/api/admin/model-groups", dependencies=[Depends(admin)])
+def admin_model_groups(db: Session = Depends(db_dep)):
+    rows = db.scalars(select(ModelGroup).order_by(ModelGroup.created_at))
+    return [_model_group_view(db, row) for row in rows]
+
+
+@app.post("/api/admin/model-groups", dependencies=[Depends(admin)])
+def admin_create_model_group(body: ModelGroupIn, db: Session = Depends(db_dep)):
+    group = ModelGroup(name=body.name.strip()[:120] or "pending")
+    db.add(group)
+    db.flush()
+    _save_model_group(db, group, body)
+    db.add(AuditLog(action="model_group.create", detail={"group_id": group.id}))
+    db.commit()
+    db.refresh(group)
+    return _model_group_view(db, group)
+
+
+@app.put("/api/admin/model-groups/{group_id}", dependencies=[Depends(admin)])
+def admin_update_model_group(
+    group_id: str, body: ModelGroupIn, db: Session = Depends(db_dep)
+):
+    group = db.get(ModelGroup, group_id)
+    if not group:
+        raise HTTPException(404, "model group not found")
+    _save_model_group(db, group, body)
+    db.add(AuditLog(action="model_group.update", detail={"group_id": group.id}))
+    db.commit()
+    db.refresh(group)
+    return _model_group_view(db, group)
+
+
+@app.delete("/api/admin/model-groups/{group_id}", dependencies=[Depends(admin)])
+def admin_delete_model_group(group_id: str, db: Session = Depends(db_dep)):
+    group = db.get(ModelGroup, group_id)
+    if not group:
+        raise HTTPException(404, "model group not found")
+    db.delete(group)
+    db.add(AuditLog(action="model_group.delete", detail={"group_id": group_id}))
+    db.commit()
+    return {"ok": True}
+
+
+@app.post("/api/admin/model-groups/{group_id}/test", dependencies=[Depends(admin)])
+async def admin_test_model_group(group_id: str, db: Session = Depends(db_dep)):
+    group = db.get(ModelGroup, group_id)
+    if not group:
+        raise HTTPException(404, "model group not found")
+    started = perf_counter()
+    try:
+        result = await complete_with_routing(
+            db,
+            UserSettings(user_id="admin-connectivity-test"),
+            [{"role": "user", "content": "请只回复 OK"}],
+            temperature=0,
+            max_tokens=16,
+            timeout=float(get_runtime_value(db, "request_timeout_seconds")),
+            group_id=group_id,
+        )
+    except Exception as exc:
+        log.warning("模型组连通性测试失败 group=%s error=%s", group_id, redact_error(exc, 300))
+        raise HTTPException(502, "模型组连通性测试失败，请检查供应商状态与服务日志") from exc
+    latency_ms = round((perf_counter() - started) * 1000)
+    db.add(
+        AuditLog(
+            action="model_group.test",
+            detail={
+                "group_id": group_id,
+                "provider_name": result.provider_name,
+                "model": result.model,
+                "latency_ms": latency_ms,
+            },
+        )
+    )
+    db.commit()
+    return {
+        "ok": True,
+        "provider_name": result.provider_name,
+        "model": result.model,
+        "route_id": result.route_id,
+        "latency_ms": latency_ms,
+    }
+
+
+@app.put("/api/admin/users/{user_id}/model-group", dependencies=[Depends(admin)])
+def admin_set_user_model_group(
+    user_id: str, body: UserModelGroupIn, db: Session = Depends(db_dep)
+):
+    if not db.get(User, user_id):
+        raise HTTPException(404, "user not found")
+    user_settings = _user_settings_for(db, user_id)
+    group = None
+    if body.model_group_id is not None:
+        group = db.get(ModelGroup, body.model_group_id)
+        if not group or not group.enabled:
+            raise HTTPException(400, "模型组不存在或未启用")
+    user_settings.model_group_id = group.id if group else None
+    if group:
+        effective_group = group
+    else:
+        effective_group = db.scalar(
+            select(ModelGroup).where(
+                ModelGroup.is_default.is_(True), ModelGroup.enabled.is_(True)
+            )
+        )
+    db.add(
+        AuditLog(
+            action="user.model_group",
+            user_id=user_id,
+            detail={"model_group_id": user_settings.model_group_id},
+        )
+    )
+    db.commit()
+    return {
+        "ok": True,
+        "model_group_id": user_settings.model_group_id,
+        "effective_group_name": effective_group.name if effective_group else None,
+    }
 
 
 @app.get("/api/admin/settings", dependencies=[Depends(admin)])
@@ -873,6 +1207,9 @@ def my_provider_delete(
     )
     if not row:
         raise HTTPException(404, "provider not found")
+    settings_row = db.get(UserSettings, principal.user_id)
+    if settings_row and settings_row.provider_key == f"byok:{row.id}":
+        settings_row.provider_key = None
     db.delete(row)
     db.commit()
     return {"ok": True}
@@ -1068,6 +1405,9 @@ def users(db: Session = Depends(db_dep), limit: int = 50):
         .limit(min(limit, 200))
     ).all()
     identities_map: dict[str, list[ChannelIdentity]] = {}
+    model_group_names = {
+        group.id: group.name for group in db.scalars(select(ModelGroup))
+    }
     for identity, uid in db.execute(
         select(ChannelIdentity, ChannelIdentity.user_id)
     ).all():
@@ -1089,6 +1429,8 @@ def users(db: Session = Depends(db_dep), limit: int = 50):
                 "blocked": u.is_blocked,
                 "created_at": u.created_at,
                 "model": s.model if s else None,
+                "model_group_id": s.model_group_id if s else None,
+                "model_group_name": model_group_names.get(s.model_group_id) if s else None,
                 "mode": u.mode,
                 "effective_mode": resolve_user_mode(db, u),
                 "account_username": a.username if a else None,
