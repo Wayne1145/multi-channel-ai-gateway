@@ -15,6 +15,8 @@
     <div class="login-sub">AI Gateway · 账户中心</div>
     <input id="username-input" class="field" placeholder="账号" autocomplete="username" required>
     <input id="password-input" type="password" class="field" placeholder="密码" autocomplete="current-password" required>
+    <input id="mfa-code-input" class="field hidden" placeholder="6 位验证码或恢复码" autocomplete="one-time-code" inputmode="numeric">
+    <button type="button" class="btn btn-block btn-ghost hidden" id="mfa-cancel">返回账号密码</button>
     <input id="display-name-input" class="field hidden" placeholder="显示名称（可选）" autocomplete="name">
     <button type="submit" class="btn btn-block btn-primary" id="login-btn">登录</button>
     <button type="button" class="btn btn-block btn-ghost hidden" id="register-toggle">注册账户</button>
@@ -290,13 +292,30 @@
           </table>
           <p class="muted small">密钥加密存储，保存后不可回显。</p>
         </div>
-        <div class="me-section">
+        <div class="me-section" id="me-security-section">
           <h3>账号安全</h3>
           <div class="me-toolbar">
             <input id="me-old-password" type="password" class="field" placeholder="原密码" style="width:160px">
             <input id="me-new-password" type="password" class="field" placeholder="新密码" style="width:160px">
             <button id="me-password-save" class="btn btn-sm btn-primary">修改密码</button>
             <button id="me-revoke-all" class="btn btn-sm btn-danger">退出其他设备</button>
+          </div>
+          <div class="me-toolbar" style="margin-top:12px">
+            <span id="me-mfa-status" class="badge">多因素认证状态未知</span>
+            <input id="me-mfa-password" type="password" class="field" placeholder="当前密码" style="width:160px" autocomplete="current-password">
+            <input id="me-mfa-code" class="field" placeholder="验证码或恢复码" style="width:180px" autocomplete="one-time-code">
+            <button id="me-mfa-setup" class="btn btn-sm btn-primary">启用 MFA</button>
+            <button id="me-mfa-disable" class="btn btn-sm btn-danger hidden">停用 MFA</button>
+          </div>
+          <div id="me-mfa-setup-box" class="me-editor hidden">
+            <div id="me-mfa-qr" class="qrcode-image"></div>
+            <p class="small muted">使用认证器扫描二维码，或手工输入秘钥：<span id="me-mfa-secret" class="mono"></span></p>
+            <button id="me-mfa-confirm" class="btn btn-sm btn-primary">验证并启用</button>
+          </div>
+          <div id="me-mfa-recovery" class="me-editor hidden">
+            <p><b>请立即保存恢复码。关闭后不会再次显示。</b></p>
+            <pre id="me-mfa-recovery-codes" class="mono"></pre>
+            <button id="me-mfa-recovery-close" class="btn btn-sm">我已保存</button>
           </div>
           <table class="table">
             <thead><tr><th>会话</th><th>角色</th><th>过期时间</th></tr></thead>
@@ -397,6 +416,7 @@
           </table>
         </div>
         <button id="admin-sessions-revoke-all" class="btn btn-sm btn-danger" style="margin-top:8px">踢出该用户全部会话</button>
+        <button id="admin-mfa-reset" class="btn btn-sm btn-danger" style="margin-top:8px">重置该用户 MFA</button>
       </div>
       <h3>登录账号</h3>
       <div class="filters" style="flex-wrap: wrap; row-gap: 8px;">
@@ -446,6 +466,6 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=9"></script>
+<script src="/static/app.js?v=10"></script>
 </body>
 </html>

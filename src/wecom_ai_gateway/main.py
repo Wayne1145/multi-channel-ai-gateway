@@ -1,3 +1,4 @@
+import hashlib
 import logging
 from datetime import UTC, datetime, timedelta
 from io import BytesIO
@@ -18,12 +19,12 @@ from sqlalchemy.orm import Session
 from . import presets as preset_service
 from .auth import (
     Principal,
+    authenticate_password,
     clear_ip_attempts,
     clear_login_failures,
     create_session,
     is_ip_locked,
     is_login_locked,
-    login,
     normalize_username,
     principal_from_bearer,
     record_ip_attempt,
@@ -42,6 +43,19 @@ from .commands import memory_text
 from .config import settings
 from .db import SessionLocal, session_scope
 from .media import list_media_metadata
+from .mfa import (
+    account_subject,
+    admin_subject,
+    consume_challenge,
+    create_challenge,
+    credential_for,
+    enable_credential,
+    enabled_credential,
+    remove_credential,
+    save_pending_secret,
+    verify_second_factor,
+    verify_subject_password,
+)
 from .migration import migrate_user_mode
 from .model_routing import complete_with_routing
 from .models import (
@@ -57,6 +71,7 @@ from .models import (
     Memory,
     Message,
     MessageStatus,
+    MfaChallenge,
     ModelGroup,
     ModelRoute,
     OutboxStatus,
@@ -84,6 +99,7 @@ from .security import decrypt_secret, encrypt_secret, hash_password, verify_admi
 from .services import ingest_channel_message, quota_status
 from .tasks import replay_task
 from .tool_execution import available_tool_names, parse_tool_allowlist
+from .totp import generate_totp_secret, otpauth_uri
 from .wecom import decrypt, parse_callback, verify_signature
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -108,7 +124,10 @@ def admin(
     db: Session = Depends(db_dep),
 ):
     principal = principal_from_bearer(db, authorization)
-    if not verify_admin_token(x_admin_token) and not (principal and principal.role == "admin"):
+    legacy_token_valid = verify_admin_token(x_admin_token)
+    if legacy_token_valid and enabled_credential(db, admin_subject()):
+        legacy_token_valid = False
+    if not legacy_token_valid and not (principal and principal.role == "admin"):
         raise HTTPException(401, "invalid admin credentials")
 
 
@@ -192,6 +211,23 @@ class LoginIn(BaseModel):
     password: str
 
 
+class MfaChallengeIn(BaseModel):
+    challenge_token: str
+    code: str
+
+
+class MfaPasswordIn(BaseModel):
+    password: str
+
+
+class MfaCodeIn(BaseModel):
+    code: str
+
+
+class MfaDisableIn(MfaPasswordIn, MfaCodeIn):
+    pass
+
+
 class RegisterIn(LoginIn):
     display_name: str | None = None
 
@@ -223,21 +259,75 @@ def auth_login(body: LoginIn, request: Request, db: Session = Depends(db_dep)):
     if is_login_locked(normalized):
         raise HTTPException(429, "登录失败次数过多，请稍后再试")
     try:
-        result = login(db, body.username, body.password)
+        result = authenticate_password(db, body.username, body.password)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     if not result:
         record_login_failure(normalized)
         raise HTTPException(401, "账号或密码错误")
+    principal, account_id, subject = result
+    if enabled_credential(db, subject):
+        return {
+            "mfa_required": True,
+            "challenge_token": create_challenge(db, subject),
+        }
     clear_login_failures(normalized)
     if client_ip:
         clear_ip_attempts(client_ip)
-    token, principal = result
+    token = create_session(
+        db,
+        role=principal.role,
+        user_id=principal.user_id,
+        account_id=account_id,
+    )
     return {
         "token": token,
         "role": principal.role,
         "user_id": principal.user_id,
         "username": principal.username,
+    }
+
+
+@app.post("/api/auth/mfa/verify")
+def auth_mfa_verify(
+    body: MfaChallengeIn, request: Request, db: Session = Depends(db_dep)
+):
+    challenge_username = ""
+    if body.challenge_token and len(body.challenge_token) <= 200:
+        challenge = db.scalar(
+            select(MfaChallenge).where(
+                MfaChallenge.token_hash
+                == hashlib.sha256(body.challenge_token.encode()).hexdigest()
+            )
+        )
+        challenge_username = challenge.username if challenge else ""
+    subject = consume_challenge(db, body.challenge_token, body.code)
+    if not subject:
+        if challenge_username:
+            record_login_failure(challenge_username.strip().lower())
+        raise HTTPException(401, "验证码或恢复码无效")
+    clear_login_failures(subject.username.strip().lower())
+    if request.client:
+        clear_ip_attempts(request.client.host)
+    token = create_session(
+        db,
+        role=subject.role,
+        user_id=subject.user_id,
+        account_id=subject.account_id,
+    )
+    db.add(
+        AuditLog(
+            user_id=subject.user_id,
+            action="mfa.login",
+            detail={"subject_type": subject.subject_type},
+        )
+    )
+    db.commit()
+    return {
+        "token": token,
+        "role": subject.role,
+        "user_id": subject.user_id,
+        "username": subject.username,
     }
 
 
@@ -286,6 +376,123 @@ def auth_me(principal: Principal = Depends(current_principal)):
         "user_id": principal.user_id,
         "username": principal.username,
     }
+
+
+def _mfa_subject_for_principal(db: Session, principal: Principal):
+    if principal.role == "admin":
+        return admin_subject()
+    if not principal.user_id:
+        raise HTTPException(403, "不支持该账号类型")
+    account = db.scalar(
+        select(Account).where(
+            Account.user_id == principal.user_id,
+            Account.is_active.is_(True),
+        )
+    )
+    if not account:
+        raise HTTPException(404, "登录账号不存在")
+    return account_subject(account)
+
+
+@app.get("/api/auth/mfa/status")
+def auth_mfa_status(
+    principal: Principal = Depends(current_principal), db: Session = Depends(db_dep)
+):
+    subject = _mfa_subject_for_principal(db, principal)
+    row = credential_for(db, subject.subject_type, subject.subject_id)
+    return {
+        "enabled": bool(row and row.enabled),
+        "recovery_codes_remaining": len(row.recovery_code_hashes or []) if row and row.enabled else 0,
+    }
+
+
+@app.post("/api/auth/mfa/setup")
+def auth_mfa_setup(
+    body: MfaPasswordIn,
+    principal: Principal = Depends(current_principal),
+    db: Session = Depends(db_dep),
+):
+    subject = _mfa_subject_for_principal(db, principal)
+    if not verify_subject_password(db, subject, body.password):
+        raise HTTPException(400, "当前密码不正确")
+    secret = generate_totp_secret()
+    try:
+        save_pending_secret(db, subject, secret)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    uri = otpauth_uri(secret, subject.username)
+    image = qrcode.make(uri, image_factory=SvgPathImage)
+    output = BytesIO()
+    image.save(output)
+    return {
+        "secret": secret,
+        "otpauth_uri": uri,
+        "qr_svg": output.getvalue().decode(),
+    }
+
+
+@app.post("/api/auth/mfa/enable")
+def auth_mfa_enable(
+    body: MfaCodeIn,
+    authorization: str | None = Header(None),
+    principal: Principal = Depends(current_principal),
+    db: Session = Depends(db_dep),
+):
+    subject = _mfa_subject_for_principal(db, principal)
+    try:
+        codes = enable_credential(db, subject, body.code)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    token_hash = hashlib.sha256(
+        (authorization or "").removeprefix("Bearer ").strip().encode()
+    ).hexdigest()
+    if subject.account_id:
+        db.execute(
+            delete(AuthSession).where(
+                AuthSession.account_id == subject.account_id,
+                AuthSession.token_hash != token_hash,
+            )
+        )
+    else:
+        db.execute(
+            delete(AuthSession).where(
+                AuthSession.role == "admin",
+                AuthSession.account_id.is_(None),
+                AuthSession.token_hash != token_hash,
+            )
+        )
+    db.add(
+        AuditLog(
+            user_id=subject.user_id,
+            action="mfa.enable",
+            detail={"subject_type": subject.subject_type},
+        )
+    )
+    db.commit()
+    return {"ok": True, "recovery_codes": codes}
+
+
+@app.post("/api/auth/mfa/disable")
+def auth_mfa_disable(
+    body: MfaDisableIn,
+    principal: Principal = Depends(current_principal),
+    db: Session = Depends(db_dep),
+):
+    subject = _mfa_subject_for_principal(db, principal)
+    if not verify_subject_password(db, subject, body.password):
+        raise HTTPException(400, "当前密码不正确")
+    if not verify_second_factor(db, subject, body.code):
+        raise HTTPException(400, "验证码或恢复码无效")
+    remove_credential(db, subject)
+    db.add(
+        AuditLog(
+            user_id=subject.user_id,
+            action="mfa.disable",
+            detail={"subject_type": subject.subject_type},
+        )
+    )
+    db.commit()
+    return {"ok": True}
 
 
 @app.get("/api/me/summary")
@@ -1376,6 +1583,26 @@ def admin_revoke_all_user_sessions(user_id: str, db: Session = Depends(db_dep)):
     return {"ok": True, "revoked": count}
 
 
+@app.delete("/api/admin/users/{user_id}/mfa", dependencies=[Depends(admin)])
+def admin_reset_user_mfa(user_id: str, db: Session = Depends(db_dep)):
+    account = db.scalar(select(Account).where(Account.user_id == user_id))
+    if not account:
+        raise HTTPException(404, "account not found")
+    subject = account_subject(account)
+    if not credential_for(db, subject.subject_type, subject.subject_id):
+        raise HTTPException(404, "mfa not configured")
+    remove_credential(db, subject)
+    db.add(
+        AuditLog(
+            user_id=user_id,
+            action="mfa.admin_reset",
+            detail={"subject_type": "account"},
+        )
+    )
+    db.commit()
+    return {"ok": True}
+
+
 @app.get("/api/admin/stats", dependencies=[Depends(admin)])
 def stats(db: Session = Depends(db_dep)):
     return {
@@ -2110,12 +2337,16 @@ def user_detail(user_id: str, db: Session = Depends(db_dep)):
         select(func.coalesce(func.sum(UsageRecord.prompt_tokens + UsageRecord.completion_tokens), 0))
         .where(UsageRecord.user_id == user_id, UsageRecord.created_at >= today)
     )
+    account = db.scalar(select(Account).where(Account.user_id == user_id))
+    mfa_subject = account_subject(account) if account else None
+    mfa_enabled = bool(mfa_subject and enabled_credential(db, mfa_subject))
     return {
         "user_id": user_id,
         "conversations": conversations or 0,
         "memories": memories or 0,
         "media_assets": media or 0,
         "tokens_today": int(tokens_today or 0),
+        "mfa_enabled": mfa_enabled,
     }
 
 

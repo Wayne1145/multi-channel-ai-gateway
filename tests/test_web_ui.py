@@ -89,6 +89,14 @@ def test_restricted_tool_settings_group_is_wired():
     html = (ROOT / "web/index.html").read_text(encoding="utf-8")
     js = (ROOT / "web/static/app.js").read_text(encoding="utf-8")
 
-    assert "/static/app.js?v=9" in html
+    assert "/static/app.js?v=10" in html
+    assert 'id="mfa-code-input"' in html
+    assert 'id="me-mfa-setup"' in html
+    assert 'id="admin-mfa-reset"' in html
     assert 'tool: "受限工具"' in js
+    assert '"/api/auth/mfa/verify"' in js
+    assert '"/api/auth/mfa/setup"' in js
+    assert '"/api/auth/mfa/enable"' in js
+    assert '"/api/auth/mfa/disable"' in js
+    assert "recovery_codes" in js
     assert '"tool"' in js

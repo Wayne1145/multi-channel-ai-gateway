@@ -12,6 +12,7 @@
   let token = sessionStorage.getItem(TOKEN_KEY) || "";
   let principal = JSON.parse(sessionStorage.getItem(AUTH_KEY) || "null");
   let registering = false;
+  let mfaChallenge = "";
 
   /* ---------- 基础请求 ---------- */
   async function api(path, opts = {}) {
@@ -20,7 +21,7 @@
       opts.headers || {},
     );
     const res = await fetch(path, Object.assign({}, opts, { headers }));
-    if (res.status === 401) {
+    if (res.status === 401 && !opts.keepAuthOn401) {
       logout();
       throw new Error("登录已失效，请重新登录");
     }
@@ -80,9 +81,16 @@
     sessionStorage.removeItem(AUTH_KEY);
     token = "";
     principal = null;
+    mfaChallenge = "";
     $("app").classList.add("hidden");
     $("login").classList.remove("hidden");
     $("password-input").value = "";
+    $("mfa-code-input").value = "";
+    $("mfa-code-input").classList.add("hidden");
+    $("mfa-cancel").classList.add("hidden");
+    $("username-input").disabled = false;
+    $("password-input").disabled = false;
+    $("login-btn").textContent = "登录";
     $("login-error").classList.add("hidden");
   }
 
@@ -92,22 +100,37 @@
     const err = $("login-error");
     const username = $("username-input").value.trim();
     const password = $("password-input").value;
-    if (!username || !password) return;
+    const mfaCode = $("mfa-code-input").value.trim();
+    if ((!username || !password) && !mfaChallenge) return;
+    if (mfaChallenge && !mfaCode) return;
     btn.disabled = true;
     err.classList.add("hidden");
     try {
-      const path = registering ? "/api/auth/register" : "/api/auth/login";
-      const payload = { username, password };
+      const path = mfaChallenge ? "/api/auth/mfa/verify" : registering ? "/api/auth/register" : "/api/auth/login";
+      const payload = mfaChallenge ? { challenge_token: mfaChallenge, code: mfaCode } : { username, password };
       if (registering) payload.display_name = $("display-name-input").value.trim() || undefined;
       const auth = await api(path, {
         method: "POST",
+        keepAuthOn401: Boolean(mfaChallenge),
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
+      if (auth.mfa_required) {
+        mfaChallenge = auth.challenge_token;
+        $("mfa-code-input").classList.remove("hidden");
+        $("login-btn").textContent = "验证并登录";
+        $("username-input").disabled = true;
+        $("password-input").disabled = true;
+        $("register-toggle").classList.add("hidden");
+        $("mfa-cancel").classList.remove("hidden");
+        $("mfa-code-input").focus();
+        return;
+      }
       token = auth.token;
       principal = auth;
       sessionStorage.setItem(TOKEN_KEY, token);
       sessionStorage.setItem(AUTH_KEY, JSON.stringify(principal));
+      mfaChallenge = "";
       enterApp();
     } catch (ex) {
       err.textContent = ex.message;
@@ -122,6 +145,16 @@
     $("display-name-input").classList.toggle("hidden", !registering);
     $("login-btn").textContent = registering ? "创建并登录" : "登录";
     $("register-toggle").textContent = registering ? "返回登录" : "注册账户";
+  });
+  $("mfa-cancel").addEventListener("click", () => {
+    mfaChallenge = "";
+    $("mfa-code-input").value = "";
+    $("mfa-code-input").classList.add("hidden");
+    $("mfa-cancel").classList.add("hidden");
+    $("username-input").disabled = false;
+    $("password-input").disabled = false;
+    $("password-input").value = "";
+    $("login-btn").textContent = "登录";
   });
   $("logout").addEventListener("click", logout);
 
@@ -306,6 +339,7 @@
       $("user-model-group").innerHTML = '<option value="">跟随平台默认组</option>' + groups
         .filter((g) => g.enabled)
         .map((g) => `<option value="${g.id}" ${user?.model_group_id === g.id ? "selected" : ""}>${esc(g.name)}${g.is_default ? "（平台默认）" : ""}</option>`).join("");
+      $("admin-mfa-reset").classList.toggle("hidden", !detail.mfa_enabled);
       loadAdminSessions(userId);
       $("user-detail-grid").innerHTML = [
         ["会话数", detail.conversations],
@@ -848,15 +882,36 @@
 
   async function loadMySettings() {
     try {
-      const [cards, presets, memories, providers, sessions, usage] = await Promise.all([
+      if (principal?.role === "admin") {
+        document.querySelectorAll("#view-me-settings .me-section").forEach((section) =>
+          section.classList.toggle("hidden", section.id !== "me-security-section"));
+        const security = $("me-security-section");
+        security.querySelector(":scope > .me-toolbar:first-of-type").classList.add("hidden");
+        security.querySelector("table").classList.add("hidden");
+        $("me-revoke-all").classList.add("hidden");
+        renderMfaStatus(await api("/api/auth/mfa/status"));
+        return;
+      }
+      const [cards, presets, memories, providers, sessions, usage, mfa] = await Promise.all([
         api("/api/me/cards"), api("/api/me/presets"), api("/api/me/memories"),
         api("/api/me/providers"), api("/api/me/sessions"), api("/api/me/usage?days=7"),
+        api("/api/auth/mfa/status"),
       ]);
       myCards = cards; myPresets = presets; myMemories = memories;
       myProviders = providers; mySessions = sessions;
       renderMyCards(); renderMyPresets(); renderMyMemories(); renderMyProviders();
-      renderMySessions(); renderMyUsage(usage);
+      renderMySessions(); renderMyUsage(usage); renderMfaStatus(mfa);
     } catch (ex) { toast(ex.message, true); }
+  }
+
+  function renderMfaStatus(mfa) {
+    $("me-mfa-status").textContent = mfa.enabled
+      ? `MFA 已启用 · 剩余 ${mfa.recovery_codes_remaining} 个恢复码`
+      : "MFA 未启用";
+    $("me-mfa-status").className = "badge " + (mfa.enabled ? "badge-ok" : "");
+    $("me-mfa-setup").classList.toggle("hidden", mfa.enabled);
+    $("me-mfa-disable").classList.toggle("hidden", !mfa.enabled);
+    $("me-mfa-setup-box").classList.add("hidden");
   }
 
   function renderMyCards() {
@@ -1044,6 +1099,58 @@
       await api("/api/me/sessions/revoke-all", { method: "POST" });
       toast("其他设备已退出"); loadMySettings();
     });
+    $("me-mfa-setup").addEventListener("click", async () => {
+      const password = $("me-mfa-password").value;
+      if (!password) return toast("请输入当前密码", true);
+      try {
+        const setup = await api("/api/auth/mfa/setup", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ password }),
+        });
+        $("me-mfa-qr").innerHTML = setup.qr_svg;
+        $("me-mfa-secret").textContent = setup.secret;
+        $("me-mfa-setup-box").classList.remove("hidden");
+        toast("请扫描二维码并输入验证码");
+      } catch (ex) { toast(ex.message, true); }
+    });
+    $("me-mfa-confirm").addEventListener("click", async () => {
+      const code = $("me-mfa-code").value.trim();
+      if (!code) return toast("请输入认证器验证码", true);
+      try {
+        const result = await api("/api/auth/mfa/enable", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ code }),
+        });
+        $("me-mfa-recovery-codes").textContent = result.recovery_codes.join("\n");
+        $("me-mfa-recovery").classList.remove("hidden");
+        $("me-mfa-setup-box").classList.add("hidden");
+        $("me-mfa-password").value = "";
+        $("me-mfa-code").value = "";
+        toast("MFA 已启用，请保存恢复码");
+      } catch (ex) { toast(ex.message, true); }
+    });
+    $("me-mfa-recovery-close").addEventListener("click", () => {
+      $("me-mfa-recovery-codes").textContent = "";
+      $("me-mfa-recovery").classList.add("hidden");
+      loadMySettings();
+    });
+    $("me-mfa-disable").addEventListener("click", async () => {
+      const password = $("me-mfa-password").value;
+      const code = $("me-mfa-code").value.trim();
+      if (!password || !code) return toast("请输入当前密码和验证码或恢复码", true);
+      if (!window.confirm("停用 MFA 会撤销所有登录会话，确认继续？")) return;
+      try {
+        await api("/api/auth/mfa/disable", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ password, code }),
+        });
+        toast("MFA 已停用，请重新登录");
+        logout();
+      } catch (ex) { toast(ex.message, true); }
+    });
   }
 
   bindMySettings();
@@ -1086,6 +1193,16 @@
     if (!window.confirm("确认踢出该用户的全部登录会话？")) return;
     await api(`/api/admin/users/${userId}/sessions/revoke-all`, { method: "POST" });
     toast("已踢出全部会话"); loadAdminSessions(userId);
+  });
+  $("admin-mfa-reset").addEventListener("click", async () => {
+    const userId = $("user-modal").dataset.userId;
+    if (!userId) return;
+    if (!window.confirm("确认重置该用户的 MFA？其全部登录会话会立即失效。")) return;
+    try {
+      await api(`/api/admin/users/${userId}/mfa`, { method: "DELETE" });
+      toast("该用户 MFA 已重置，全部会话已撤销");
+      loadAdminSessions(userId);
+    } catch (ex) { toast(ex.message, true); }
   });
   $("display-name-save").addEventListener("click", async () => {
     const userId = $("user-modal").dataset.userId;

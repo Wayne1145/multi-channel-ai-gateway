@@ -86,6 +86,47 @@ class AuthSession(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class MfaCredential(Base):
+    """TOTP 凭据；秘钥加密保存，恢复码只保存不可逆摘要。"""
+
+    __tablename__ = "mfa_credentials"
+    __table_args__ = (
+        UniqueConstraint("subject_type", "subject_id", name="uq_mfa_credential_subject"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    subject_type: Mapped[str] = mapped_column(String(20), index=True)  # account | admin
+    subject_id: Mapped[str] = mapped_column(String(64), index=True)
+    secret_encrypted: Mapped[str] = mapped_column(Text)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    recovery_code_hashes: Mapped[list] = mapped_column(JSON, default=list)
+    last_totp_counter: Mapped[int | None] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class MfaChallenge(Base):
+    """密码验证后的短时单用途挑战；数据库只保存挑战令牌摘要。"""
+
+    __tablename__ = "mfa_challenges"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    subject_type: Mapped[str] = mapped_column(String(20), index=True)
+    subject_id: Mapped[str] = mapped_column(String(64), index=True)
+    account_id: Mapped[str | None] = mapped_column(
+        ForeignKey("accounts.id", ondelete="CASCADE"), index=True
+    )
+    user_id: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    role: Mapped[str] = mapped_column(String(20))
+    username: Mapped[str] = mapped_column(String(64))
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class ChannelIdentity(Base):
     __tablename__ = "channel_identities"
     __table_args__ = (UniqueConstraint("channel", "account_id", "external_id_hash"),)

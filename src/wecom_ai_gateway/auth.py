@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from .config import settings
 from .db import SessionLocal
+from .mfa import MfaSubject, account_subject, admin_subject, enabled_credential
 from .models import Account, AuthSession, User
 from .queueing import redis_client
 from .runtime_settings import get_runtime_value
@@ -61,11 +62,16 @@ def create_session(
     return token
 
 
-def login(db: Session, username: str, password: str) -> tuple[str, Principal] | None:
+def authenticate_password(
+    db: Session, username: str, password: str
+) -> tuple[Principal, str | None, MfaSubject] | None:
     normalized = normalize_username(username)
     if normalized == settings.admin_username.strip().lower() and verify_admin_token(password):
-        token = create_session(db, role="admin", user_id=None, account_id=None)
-        return token, Principal(role="admin", user_id=None, username=settings.admin_username)
+        return (
+            Principal(role="admin", user_id=None, username=settings.admin_username),
+            None,
+            admin_subject(),
+        )
     account = db.scalar(select(Account).where(Account.username == normalized, Account.is_active.is_(True)))
     if (
         not account
@@ -74,13 +80,27 @@ def login(db: Session, username: str, password: str) -> tuple[str, Principal] | 
         or user.is_blocked
     ):
         return None
+    return (
+        Principal(role=account.role, user_id=account.user_id, username=account.username),
+        account.id,
+        account_subject(account),
+    )
+
+
+def login(db: Session, username: str, password: str) -> tuple[str, Principal] | None:
+    authenticated = authenticate_password(db, username, password)
+    if not authenticated:
+        return None
+    principal, account_id, subject = authenticated
+    if enabled_credential(db, subject):
+        return None
     token = create_session(
         db,
-        role=account.role,
-        user_id=account.user_id,
-        account_id=account.id,
+        role=principal.role,
+        user_id=principal.user_id,
+        account_id=account_id,
     )
-    return token, Principal(role=account.role, user_id=account.user_id, username=account.username)
+    return token, principal
 
 
 def _login_lock_key(username: str) -> str:
