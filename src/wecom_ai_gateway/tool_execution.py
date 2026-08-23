@@ -5,10 +5,8 @@
 """
 
 import asyncio
-import html
 import logging
 import os
-import re
 from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -20,67 +18,6 @@ log_tool = logging.getLogger(__name__)
 
 class ToolValidationError(ValueError):
     """工具名或参数不符合白名单约束。"""
-
-
-_BING_RESULT_RE = re.compile(
-    r'<li class="b_algo".*?<h2[^>]*><a[^>]*href="([^"]+)"[^>]*>(.*?)</a>.*?</h2>'
-    r'(?:.*?<p[^>]*>(.*?)</p>)?',
-    re.DOTALL,
-)
-
-
-def _clean_html_fragment(raw: str) -> str:
-    """去除必应结果标题/摘要中的 HTML 标签并反转义实体。"""
-    text = re.sub(r"<[^>]+>", "", raw)
-    return html.unescape(text).strip()
-
-
-# 常见停用词：这些词独立成词即可，不需要引号保护
-_BING_STOPWORDS = {
-    "的", "了", "是", "在", "和", "与", "及", "或", "等", "一个", "什么", "如何",
-    "怎么", "今天", "昨天", "明天", "新闻", "最新", "最新消息", "什么意思", "是什么",
-    "为什么", "哪个", "哪些", "哪里", "多少", "介绍", "推荐", "有什么", "怎么样",
-}
-
-
-def _improve_bing_query(query: str) -> str:
-    """改进必应中文查询，缓解其分词对无空格长中文查询的漂移。
-
-    策略：
-    - 中文词组（含夹带字母数字的如 东方Project）整体加引号，防止必应把
-      "广东东方Project同人展" 拆成 "广东/东方/Project/同人展"；
-    - 保持英文/数字原样；
-    - 常用停用词不引号（避免把 "今天新闻" 括死成短语导致无结果）。
-    """
-    # 已含引号/操作符则原样返回（模型或用户已精确构造）
-    if '"' in query or "site:" in query or "filetype:" in query:
-        return query
-    parts = query.split()
-    if len(parts) <= 1:
-        # 单段：若为长中文词组（>=4 字）且不含常见停用词子串，加引号保护；
-        # 含停用词（如"今天新闻"）整体加引号反而可能括死成短语导致无结果。
-        seg = parts[0].strip() if parts else ""
-        if (
-            seg
-            and re.search(r"[\u4e00-\u9fff]", seg)
-            and len(seg) >= 4
-            and seg not in _BING_STOPWORDS
-            and not any(stop in seg for stop in _BING_STOPWORDS)
-        ):
-            return f'"{seg}"'
-        return query
-    improved = []
-    for part in parts:
-        part = part.strip()
-        if not part:
-            continue
-        # 含中文（可能夹带字母数字）的词段加引号，除非是纯停用词
-        if re.search(r"[\u4e00-\u9fff]", part) and part not in _BING_STOPWORDS:
-            # 中文+英文混合（如 东方Project）整体加引号
-            improved.append(f'"{part}"')
-        else:
-            improved.append(part)
-    return " ".join(improved)
 
 
 _TOOL_SCHEMAS: dict[str, dict] = {
@@ -132,7 +69,7 @@ _TOOL_SCHEMAS: dict[str, dict] = {
         "type": "function",
         "function": {
             "name": "web_search",
-            "description": "通过必应搜索互联网，返回结果标题、链接与摘要。用于查询实时新闻、最新信息或任何训练数据可能过时的问题。只读。",
+            "description": "通过多引擎搜索（startpage 等）搜索互联网，返回结果标题、链接与摘要。用于查询实时新闻、最新信息或任何训练数据可能过时的问题。只读。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -421,59 +358,6 @@ async def _open_websearch(arguments: dict[str, Any], timeout: float) -> dict | N
     return None
 
 
-async def _bing_search(arguments: dict[str, Any], timeout: float) -> dict:
-    """通过必应（固定端点）搜索互联网，返回前 5 条标题/链接/摘要。
-
-    安全：搜索端点写死为 https://www.bing.com/search，调用者只能提供 query；
-    不跟随外部链接、不抓取页面正文，只解析结果列表。中文查询走必应中国。
-    """
-    _validate_keys(arguments, {"query"})
-    query = arguments.get("query")
-    if not isinstance(query, str) or not query.strip():
-        raise ToolValidationError("搜索关键词必须是 1 到 200 字符的文本")
-    query = query.strip()
-    if len(query) > 200:
-        raise ToolValidationError("搜索关键词不能超过 200 字符")
-
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
-        ),
-        "Accept-Language": "zh-CN,zh;q=0.9",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    }
-    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
-        response = await client.get(
-            "https://www.bing.com/search",
-            params={"q": _improve_bing_query(query), "mkt": "zh-CN", "ensearch": 0},
-            headers=headers,
-        )
-        response.raise_for_status()
-        page = response.text
-
-    results = []
-    for match in _BING_RESULT_RE.finditer(page):
-        url = html.unescape(match.group(1)).strip()
-        title = _clean_html_fragment(match.group(2))
-        snippet = _clean_html_fragment(match.group(3) or "")
-        # 只保留 http(s) 结果，跳过必应内部导航链接
-        if not url.startswith("http"):
-            continue
-        results.append(
-            {
-                "title": title[:200],
-                "url": url[:500],
-                "snippet": snippet[:400],
-            }
-        )
-        if len(results) >= 5:
-            break
-    if not results:
-        return {"ok": True, "query": query, "results": [], "note": "没有搜索到结果"}
-    return {"ok": True, "query": query, "results": results, "source": "Bing"}
-
-
 async def execute_tool(name: str, arguments: dict[str, Any], *, timeout: float) -> dict:
     """执行白名单只读工具，并对整个执行过程施加超时。"""
     if name not in _TOOL_SCHEMAS:
@@ -483,10 +367,15 @@ async def execute_tool(name: str, arguments: dict[str, Any], *, timeout: float) 
     if name == "get_current_time":
         return _current_time(arguments)
     if name == "web_search":
-        # 优先本地 open-websearch daemon（startpage 等引擎，海外 IP 不反爬、质量高）；
-        # daemon 不可用或无结果时回退直连必应（查询改写已内置）。
+        # 只走本地 open-websearch daemon（startpage 引擎，海外 IP 不反爬、质量高）；
+        # 不再回退直连必应（其 HTML 在数据中心 IP 上会返回漂移/无关内容）。
         daemon_result = await asyncio.wait_for(_open_websearch(arguments, timeout), timeout=timeout)
         if daemon_result is not None:
             return daemon_result
-        return await asyncio.wait_for(_bing_search(arguments, timeout), timeout=timeout)
+        return {
+            "ok": True,
+            "query": str(arguments.get("query") or ""),
+            "results": [],
+            "note": "搜索服务暂时不可用，请稍后再试或换一种问法。",
+        }
     return await asyncio.wait_for(_weather(arguments, timeout), timeout=timeout)

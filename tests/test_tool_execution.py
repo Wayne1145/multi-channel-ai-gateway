@@ -450,33 +450,19 @@ def test_runtime_settings_reject_unknown_tool_names(db):
 
 @respx.mock
 @pytest.mark.anyio
-async def test_web_search_tool_uses_fixed_bing_endpoint_and_parses_results():
-    """web_search 固定走必应端点，返回前 5 条标题/链接/摘要。"""
-    page = '''
-<html><body>
-<li class="b_algo"><h2><a href="https://example.com/alpha">Alpha 最新消息</a></h2>
-<div class="b_caption"><p>Alpha 公司今天发布了新产品，主打 AI 芯片。</p></div></li>
-<li class="b_algo"><h2><a href="https://example.com/beta">Beta 教程</a></h2>
-<div class="b_caption"><p>Beta 入门教程，涵盖安装与配置。</p></div></li>
-<li class="b_algo"><h2><a href="https://example.com/gamma">Gamma 分析</a></h2>
-<div class="b_caption"><p>Gamma 市场分析报告。</p></div></li>
-</body></html>
-'''
-    route = respx.get("https://www.bing.com/search").mock(
-        return_value=httpx.Response(200, text=page)
+async def test_web_search_daemon_unavailable_returns_friendly_note():
+    """web_search 只走 open-websearch daemon；不可用时返回友好提示，不再回退必应。"""
+    respx.post("http://open-websearch:3210/search").mock(
+        return_value=httpx.Response(503, text="daemon down")
     )
 
-    result = await execute_tool("web_search", {"query": "alpha 最新消息"}, timeout=5)
+    result = await execute_tool("web_search", {"query": "测试查询"}, timeout=10)
 
     assert result["ok"] is True
-    assert result["source"] == "Bing"
-    assert len(result["results"]) == 3
-    first = result["results"][0]
-    assert first["title"] == "Alpha 最新消息"
-    assert first["url"] == "https://example.com/alpha"
-    assert "新产品" in first["snippet"]
-    # 固定端点：查询参数只能带 q/mkt/ensearch，不允许自定义 URL
-    assert route.calls.last.request.url.host == "www.bing.com"
+    assert result["results"] == []
+    assert "不可用" in result.get("note", "")
+    # 不得回退到必应（未 mock bing，若回退会因 respx 未 mock 而报错）
+    assert "Bing" not in str(result)
 
 
 @respx.mock
@@ -492,8 +478,8 @@ async def test_web_search_rejects_bad_arguments_and_handles_no_results():
     with pytest.raises(ToolValidationError, match="200"):
         await execute_tool("web_search", {"query": "x" * 201}, timeout=5)
 
-    respx.get("https://www.bing.com/search").mock(
-        return_value=httpx.Response(200, text="<html><body>没有结果</body></html>")
+    respx.post("http://open-websearch:3210/search").mock(
+        return_value=httpx.Response(200, json={"status": "ok", "data": {"results": []}})
     )
     result = await execute_tool("web_search", {"query": "不存在的东西"}, timeout=5)
     assert result["ok"] is True
@@ -507,22 +493,6 @@ def test_web_search_available_in_allowlist_schema():
     assert "web_search" in available_tool_names()
     definitions = tool_definitions({"web_search"})
     assert definitions[0]["function"]["name"] == "web_search"
-
-
-def test_improve_bing_query_protects_chinese_phrases():
-    """查询改写：无空格中文长查询加引号保护，停用词/英文/已构造查询不动。"""
-    from wecom_ai_gateway.tool_execution import _improve_bing_query
-
-    assert _improve_bing_query("广东东方Project同人展") == '"广东东方Project同人展"'
-    assert _improve_bing_query("东方project 广州 同人展 2025") == '"东方project" "广州" "同人展" 2025'
-    assert _improve_bing_query("2026年 人工智能 最新进展") == '"2026年" "人工智能" "最新进展"'
-    # 停用词子串：不整体加引号，避免括死
-    assert _improve_bing_query("今天新闻") == "今天新闻"
-    # 英文原样
-    assert _improve_bing_query("python tutorial") == "python tutorial"
-    # 已精确构造的查询不动
-    assert _improve_bing_query('"exact phrase" test') == '"exact phrase" test'
-    assert _improve_bing_query("site:github.com react") == "site:github.com react"
 
 
 def test_sensenova_usage_excluded_from_quota(db):
@@ -661,37 +631,17 @@ async def test_web_search_uses_open_websearch_daemon_first():
 
 @respx.mock
 @pytest.mark.anyio
-async def test_web_search_falls_back_to_bing_when_daemon_unavailable():
-    """daemon 不可用时回退直连必应。"""
-    respx.post("http://open-websearch:3210/search").mock(
-        return_value=httpx.Response(503, text="daemon down")
-    )
-    respx.get("https://www.bing.com/search").mock(
-        return_value=httpx.Response(200, text="<li class=\"b_algo\"><h2><a href=\"https://example.com/x\">直连结果</a></h2><p>必应回退内容</p></li>")
-    )
-
-    result = await execute_tool("web_search", {"query": "回退测试"}, timeout=10)
-
-    assert result["ok"] is True
-    assert result["source"] == "Bing"
-    assert result["results"][0]["title"] == "直连结果"
-
-
-@respx.mock
-@pytest.mark.anyio
 async def test_web_search_daemon_empty_results_falls_back():
-    """daemon 返回空结果时也回退直连。"""
+    """daemon 返回空结果时返回友好提示，不再回退直连必应。"""
     respx.post("http://open-websearch:3210/search").mock(
         return_value=httpx.Response(200, json={"status": "ok", "data": {"results": []}})
     )
-    respx.get("https://www.bing.com/search").mock(
-        return_value=httpx.Response(200, text="<li class=\"b_algo\"><h2><a href=\"https://example.com/b\">B 结果</a></h2><p>内容</p></li>")
-    )
 
-    result = await execute_tool("web_search", {"query": "空结果回退"}, timeout=10)
+    result = await execute_tool("web_search", {"query": "空结果"}, timeout=10)
 
-    assert result["source"] == "Bing"
-    assert result["results"][0]["title"] == "B 结果"
+    assert result["ok"] is True
+    assert result["results"] == []
+    assert "不可用" in result.get("note", "") or "没有搜索到" in str(result)
 
 
 def test_sanitize_search_query_removes_noise():
