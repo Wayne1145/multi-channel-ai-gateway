@@ -325,6 +325,33 @@ async def _weather(arguments: dict[str, Any], timeout: float) -> dict:
     }
 
 
+# 常见泛词：与具体主题无关、startpage 精确匹配时反而稀释结果的词
+_SEARCH_NOISE_WORDS = {
+    "活动", "最新", "最近", "信息", "介绍", "有哪些", "有什么", "怎么样",
+    "是什么", "推荐", "新闻", "消息", "2025", "2026", "2024", "2023",
+}
+
+
+def _sanitize_search_query(query: str) -> str:
+    """净化搜索查询：去除冗余年份与泛词，保留核心关键词。
+
+    模型常生成"广东 东方同人展 2025 2026 活动"这类带年份+泛词的查询，
+    startpage 精确匹配会返回 0 结果。去掉噪音后（"广东 东方同人展"）
+    能稳定命中高质量结果。纯英文/已精确查询保持原样。
+    """
+    query = query.strip()
+    if not query:
+        return query
+    # 已含引号/操作符：模型已精确构造，不处理
+    if '"' in query or "site:" in query or "filetype:" in query:
+        return query
+    parts = query.split()
+    kept = [part for part in parts if part not in _SEARCH_NOISE_WORDS]
+    if not kept:
+        return query
+    return " ".join(kept)
+
+
 async def _open_websearch(arguments: dict[str, Any], timeout: float) -> dict | None:
     """通过本地 open-websearch daemon 搜索（startpage 引擎优先）。
 
@@ -346,39 +373,52 @@ async def _open_websearch(arguments: dict[str, Any], timeout: float) -> dict | N
     # startpage 代理 Google 结果、对海外 VPS IP 不反爬、中文质量最高；
     # 单引擎请求更稳（多引擎并行时 startpage 可能超时被跳过）。
     engines = ["startpage"]
-    try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.post(
-                daemon_url,
-                json={"query": query, "limit": 5, "engines": engines},
-            )
-            response.raise_for_status()
-            payload = response.json()
-        data = payload.get("data") or {}
-        results = data.get("results") or []
-        if not results:
-            return None
-        normalized = []
-        for item in results[:5]:
-            if not isinstance(item, dict):
+    # 优先用净化后的查询（去掉年份/泛词，模型常生成"广东 东方同人展 2025 2026 活动"
+    # 这类噪音，startpage 精确匹配会返回空）；空结果时回退原始查询再试一次。
+    candidate_queries = []
+    sanitized = _sanitize_search_query(query)
+    if sanitized != query:
+        candidate_queries.append(sanitized)
+    candidate_queries.append(query)
+
+    for candidate in candidate_queries:
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                response = await client.post(
+                    daemon_url,
+                    json={"query": candidate, "limit": 5, "engines": engines},
+                )
+                response.raise_for_status()
+                payload = response.json()
+            data = payload.get("data") or {}
+            results = data.get("results") or []
+            if not results:
                 continue
-            url = str(item.get("url") or "")
-            if not url.startswith("http"):
+            normalized = []
+            for item in results[:5]:
+                if not isinstance(item, dict):
+                    continue
+                url = str(item.get("url") or "")
+                if not url.startswith("http"):
+                    continue
+                normalized.append(
+                    {
+                        "title": str(item.get("title") or "")[:200],
+                        "url": url[:500],
+                        "snippet": str(item.get("description") or item.get("snippet") or "")[:400],
+                        "source": str(item.get("source") or item.get("engine") or "")[:80],
+                    }
+                )
+            if not normalized:
                 continue
-            normalized.append(
-                {
-                    "title": str(item.get("title") or "")[:200],
-                    "url": url[:500],
-                    "snippet": str(item.get("description") or item.get("snippet") or "")[:400],
-                    "source": str(item.get("source") or item.get("engine") or "")[:80],
-                }
+            return {"ok": True, "query": query, "results": normalized, "source": "open-websearch"}
+        except Exception:
+            log_tool.warning(
+                "open-websearch daemon 搜索失败，回退直连 query=%s candidate=%s",
+                query, candidate, exc_info=True,
             )
-        if not normalized:
-            return None
-        return {"ok": True, "query": query, "results": normalized, "source": "open-websearch"}
-    except Exception:
-        log_tool.warning("open-websearch daemon 搜索失败，回退直连 query=%s", query, exc_info=True)
-        return None
+            break
+    return None
 
 
 async def _bing_search(arguments: dict[str, Any], timeout: float) -> dict:

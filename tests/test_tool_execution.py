@@ -692,3 +692,52 @@ async def test_web_search_daemon_empty_results_falls_back():
 
     assert result["source"] == "Bing"
     assert result["results"][0]["title"] == "B 结果"
+
+
+def test_sanitize_search_query_removes_noise():
+    """净化查询：去掉冗余年份与泛词，避免 startpage 精确匹配返回空。"""
+    from wecom_ai_gateway.tool_execution import _sanitize_search_query
+
+    assert _sanitize_search_query("广东 东方同人展 2025 2026 活动") == "广东 东方同人展"
+    assert _sanitize_search_query("东方Project 广州 同人展 2025 2026") == "东方Project 广州 同人展"
+    assert _sanitize_search_query("汕头 东方THO") == "汕头 东方THO"
+    # 单 token（无空格）无法按词拆分，保留原样避免误删核心词
+    assert _sanitize_search_query("今天有什么最新活动") == "今天有什么最新活动"
+    assert _sanitize_search_query("python tutorial") == "python tutorial"
+
+
+@respx.mock
+@pytest.mark.anyio
+async def test_web_search_daemon_retries_sanitized_query_on_empty():
+    """daemon 首次空结果时用净化查询重试，成功则不再回退 Bing。"""
+    calls = []
+    def handler(request):
+        calls.append(request.url.params.get("query") or "N/A")
+        body = request.content
+        # 模拟：首次（原始查询）返回空；净化后返回结果
+        return httpx.Response(200, json={"status": "ok", "data": {"results": []}})
+
+    # 用 respx 动态响应：第一次空，第二次有结果
+    daemon_route = respx.post("http://open-websearch:3210/search")
+    daemon_route.side_effect = [
+        httpx.Response(200, json={"status": "ok", "data": {"results": []}}),
+        httpx.Response(200, json={
+            "status": "ok",
+            "data": {"results": [{
+                "title": "广州·东方同人only东方游剧天2026 - 漫展演出",
+                "url": "https://show.bilibili.com/platform/detail.html?id=1000420",
+                "description": "广东省广州市白云区西城智汇Park 路演中心。电子票，凭购票二维码验证入场。",
+                "source": "show.bilibili.com",
+                "engine": "startpage",
+            }]},
+        }),
+    ]
+
+    result = await execute_tool("web_search", {"query": "广东 东方同人展 2025 2026 活动"}, timeout=15)
+
+    assert result["ok"] is True
+    assert result["source"] == "open-websearch"
+    assert len(result["results"]) == 1
+    assert "东方同人only" in result["results"][0]["title"]
+    # 两次请求都应发给 daemon（没有回退 Bing）
+    assert len(daemon_route.calls) == 2
