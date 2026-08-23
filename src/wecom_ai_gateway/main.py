@@ -520,6 +520,7 @@ def my_summary(
     )
     quota = quota_status(db, user_id, db.get(UserSettings, user_id))
     quota["alert_threshold"] = int(get_runtime_value(db, "quota_alert_threshold"))
+    us = db.get(UserSettings, user_id)
     return {
         "user_id": user_id,
         "display_name": user.display_name,
@@ -532,6 +533,32 @@ def my_summary(
         "presets": count(Preset, Preset.user_id == user_id),
         "providers": count(UserProvider, UserProvider.user_id == user_id),
         "quota": quota,
+        # 用户级开关：角色卡设置页读取并允许修改
+        "command_guidance_enabled": bool(us.command_guidance_enabled is not False) if us else True,
+    }
+
+
+@app.patch("/api/me/settings")
+def my_settings_update(
+    body: dict,
+    principal: Principal = Depends(current_user),
+    db: Session = Depends(db_dep),
+):
+    """用户级设置更新。目前支持 command_guidance_enabled：开启时系统提示词会注入
+    /card /memory /kb /preset /bind 等命令索引以帮助用户自助；关闭时保持角色扮演沉浸度，
+    不影响记忆库、网络搜索、工具调用等其他系统提示词。"""
+    assert principal.user_id is not None
+    user_settings = _user_settings_for(db, principal.user_id)
+    if "command_guidance_enabled" in body:
+        val = body["command_guidance_enabled"]
+        if not isinstance(val, bool):
+            raise HTTPException(400, "command_guidance_enabled must be boolean")
+        user_settings.command_guidance_enabled = val
+        db.commit()
+    us = db.get(UserSettings, principal.user_id)
+    return {
+        "user_id": principal.user_id,
+        "command_guidance_enabled": bool(us.command_guidance_enabled is not False) if us else True,
     }
 
 

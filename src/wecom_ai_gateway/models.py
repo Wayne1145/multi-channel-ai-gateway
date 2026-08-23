@@ -160,6 +160,9 @@ class UserSettings(Base):
     model_group_id: Mapped[str | None] = mapped_column(
         ForeignKey("model_groups.id", ondelete="SET NULL"), index=True
     )
+    # 命令指引开关：关闭时系统提示词不再注入 /help 命令索引，改善角色扮演沉浸度；
+    # 不影响记忆库、网络搜索、工具调用等其他系统提示词。默认 True 保持兼容。
+    command_guidance_enabled: Mapped[bool | None] = mapped_column(Boolean, default=True)
 
 
 class Conversation(Base):

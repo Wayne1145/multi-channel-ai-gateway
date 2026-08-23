@@ -185,5 +185,28 @@ class WeComClient:
             raise RuntimeError(f"media/upload failed: {d.get('errcode')} {d.get('errmsg')}")
         return d["media_id"]
 
+    async def upload_media_from_bytes(self, media_type: str, content: bytes) -> str:
+        """把内存中的二进制内容上传为企微临时素材，返回 media_id。
+
+        仅用于二维码等由本进程直接生成的媒体；不接受外部来源。
+        """
+        if media_type not in {"image", "voice", "file"}:
+            raise ValueError(f"不支持的客服媒体类型：{media_type}")
+        token = await self.access_token()
+        try:
+            async with httpx.AsyncClient(timeout=settings.wecom_upload_timeout_seconds) as c:
+                upload = await c.post(
+                    "https://qyapi.weixin.qq.com/cgi-bin/media/upload",
+                    params={"access_token": token, "type": media_type},
+                    files={"media": (f"media.{media_type}", content)},
+                )
+                upload.raise_for_status()
+                d = upload.json()
+        except httpx.HTTPError as exc:
+            raise RuntimeError(redact_error(exc)) from exc
+        if d.get("errcode") != 0:
+            raise RuntimeError(f"media/upload failed: {d.get('errcode')} {d.get('errmsg')}")
+        return d["media_id"]
+
 
 client = WeComClient()
