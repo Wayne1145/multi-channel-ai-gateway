@@ -641,7 +641,7 @@ async def test_web_search_uses_open_websearch_daemon_first():
         "error": None,
         "hint": None,
     }
-    route = respx.post("http://127.0.0.1:3210/search").mock(
+    route = respx.post("http://open-websearch:3210/search").mock(
         return_value=httpx.Response(200, json=daemon_body)
     )
 
@@ -663,7 +663,7 @@ async def test_web_search_uses_open_websearch_daemon_first():
 @pytest.mark.anyio
 async def test_web_search_falls_back_to_bing_when_daemon_unavailable():
     """daemon 不可用时回退直连必应。"""
-    respx.post("http://127.0.0.1:3210/search").mock(
+    respx.post("http://open-websearch:3210/search").mock(
         return_value=httpx.Response(503, text="daemon down")
     )
     respx.get("https://www.bing.com/search").mock(
@@ -681,7 +681,7 @@ async def test_web_search_falls_back_to_bing_when_daemon_unavailable():
 @pytest.mark.anyio
 async def test_web_search_daemon_empty_results_falls_back():
     """daemon 返回空结果时也回退直连。"""
-    respx.post("http://127.0.0.1:3210/search").mock(
+    respx.post("http://open-websearch:3210/search").mock(
         return_value=httpx.Response(200, json={"status": "ok", "data": {"results": []}})
     )
     respx.get("https://www.bing.com/search").mock(

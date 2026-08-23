@@ -341,9 +341,11 @@ async def _open_websearch(arguments: dict[str, Any], timeout: float) -> dict | N
         raise ToolValidationError("搜索关键词不能超过 200 字符")
 
     daemon_url = os.environ.get(
-        "OPEN_WEBSEARCH_DAEMON_URL", "http://127.0.0.1:3210/search"
+        "OPEN_WEBSEARCH_DAEMON_URL", "http://open-websearch:3210/search"
     )
-    engines = ["startpage", "bing", "sogou", "hackernews"]
+    # startpage 代理 Google 结果、对海外 VPS IP 不反爬、中文质量最高；
+    # 单引擎请求更稳（多引擎并行时 startpage 可能超时被跳过）。
+    engines = ["startpage"]
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
             response = await client.post(

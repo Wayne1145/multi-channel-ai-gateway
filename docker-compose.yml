@@ -37,6 +37,17 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
+  open-websearch:
+    image: ghcr.io/aas-ee/open-web-search:latest
+    restart: unless-stopped
+    entrypoint: ["node", "/app/build/index.js", "serve"]
+    environment:
+      OPEN_WEBSEARCH_DAEMON_HOST: "0.0.0.0"
+    healthcheck:
+      test: ["CMD", "node", "-e", "const http=require('http');http.get({host:'127.0.0.1',port:3210,path:'/health'},r=>{process.exit(r.statusCode===200?0:1)}).on('error',()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
   postgres:
     image: pgvector/pgvector:pg16
     restart: unless-stopped
