@@ -210,6 +210,19 @@ def fail_task(
                 if message:
                     message.status = MessageStatus.dead
                     message.error = task.last_error
+                    # 模型线路全部失败时，给用户发一条精简错误通知（不调用 AI）；
+                    # notify 任务自身失败不会再创建新的 notify，避免无限循环。
+                    try:
+                        notify = add_task(
+                            db,
+                            "notify",
+                            f"notify:{message.id}",
+                            {"message_id": message.id},
+                        )
+                        if notify is not None:
+                            notify_worker()
+                    except Exception:
+                        log.exception("创建模型故障错误通知任务失败 message=%s", message.id)
         else:
             delay = min(
                 int(get_runtime_value(db, "task_retry_base_seconds")) * (2 ** (task.attempts - 1)),

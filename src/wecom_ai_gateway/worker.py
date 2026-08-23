@@ -40,6 +40,19 @@ async def execute_task(task) -> None:
                 raise RuntimeError(f"消息任务正在执行：{message_id}")
             await process_message(message_id)
         return
+    if task.task_type == "notify":
+        # 模型故障错误通知：不调用 AI，直接投递死信提示；自身失败不会创建新 notify。
+        from .db import SessionLocal
+        from .services import notify_model_error
+
+        db = SessionLocal()
+        try:
+            ok = await notify_model_error(db, task.payload["message_id"])
+            if not ok:
+                raise RuntimeError("模型故障错误通知投递失败")
+        finally:
+            db.close()
+        return
     raise ValueError(f"未知任务类型：{task.task_type}")
 
 

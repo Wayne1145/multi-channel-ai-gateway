@@ -77,6 +77,11 @@ SPECS: list[SettingSpec] = [
     SettingSpec("unconfigured_model_message", "model", "模型未配置提示", "str",
                 env_attr="unconfigured_model_message", max=500,
                 description="平台未配置模型凭据时返回给用户的提示。"),
+    SettingSpec("model_error_message", "model", "模型故障提示文案", "str",
+                default="[error] 后端服务出现错误，请联系管理员。", max=500,
+                description="所有模型线路均失败、消息进入死信时发送给用户的提示文案。"),
+    SettingSpec("model_error_show_detail", "model", "向用户显示错误详情", "bool", default=False,
+                description="模型故障提示中是否附上精简的错误详情；关闭则只显示通用文案。"),
     # ---------- 2.1 受限工具执行 ----------
     SettingSpec("tools_enabled", "tool", "启用受限工具执行", "bool", default=False,
                 description="默认关闭。开启后模型只能调用下方白名单中的只读工具。"),

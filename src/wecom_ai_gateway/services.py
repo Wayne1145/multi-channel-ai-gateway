@@ -694,7 +694,7 @@ async def _complete_ai(db, row: Message, conversation: Conversation, user_settin
                 "\n" + COMMAND_HELP
             )
         except Exception:
-            pass
+            log.warning("命令指引注入失败，按关闭处理", exc_info=True)
     prompts = [{"role": "system", "content": system_prompt}]
     prompts.extend(
         {
@@ -735,6 +735,7 @@ async def _complete_ai(db, row: Message, conversation: Conversation, user_settin
     active_api_key = api_key
     active_model = model
     record_provider = provider_name
+    fallback_hit = False
     while True:
         if use_model_group:
             from .model_routing import complete_with_routing
@@ -774,6 +775,7 @@ async def _complete_ai(db, row: Message, conversation: Conversation, user_settin
                 active_api_key = settings.fallback_api_key
                 active_model = settings.fallback_model
                 record_provider = "openai-compatible(fallback)"
+                fallback_hit = True
                 # 切换后整条消息（含后续工具轮次）都走备用线路，避免线路来回跳
                 result = await provider_for(
                     active_provider,
@@ -792,8 +794,9 @@ async def _complete_ai(db, row: Message, conversation: Conversation, user_settin
                 completion_tokens=result.completion_tokens,
             )
         )
-        # 备用线路命中时记录审计，便于管理员观察回退是否过于频繁
-        if record_provider.endswith("(fallback)"):
+        # 备用线路命中时记录审计，便于管理员观察回退是否过于频繁（每条消息只记一次）
+        if fallback_hit:
+            fallback_hit = False
             db.add(
                 AuditLog(
                     user_id=row.user_id,
@@ -893,6 +896,94 @@ def _deliver_reply(db: Session, conversation, row: Message, content: str) -> Non
     db.close()
 
 
+async def notify_model_error(db: Session, message_id: str) -> bool:
+    """向用户投递模型故障错误通知（消息进入死信后由 notify 任务调用）。
+
+    文案与是否显示详情由管理员运行时设置控制：
+    - model_error_message：通用提示文案，默认 "[error] 后端服务出现错误，请联系管理员。"
+    - model_error_show_detail：为 True 时附加精简的错误详情（脱敏、截断）。
+    本函数不调用 AI，只发送错误通知并写一条 outbound 记录；发送失败返回 False，
+    由 Outbox 重试 notify 任务（notify 任务自身失败不会再创建新的 notify）。
+    """
+    row = db.get(Message, message_id)
+    if row is None:
+        return False
+    metadata = dict(row.metadata_json or {})
+    if row.channel == "wecom_kf":
+        account_id = metadata.get("open_kfid") or settings.wecom_open_kfid
+    else:
+        account_id = metadata.get("instance_id")
+    if not account_id:
+        return False
+    identity = db.scalar(
+        select(ChannelIdentity).where(
+            ChannelIdentity.user_id == row.user_id,
+            ChannelIdentity.channel == row.channel,
+            ChannelIdentity.account_id == account_id,
+        )
+    )
+    if identity is None:
+        return False
+    external_id = decrypt_secret(identity.external_id_encrypted)
+
+    base_text = str(get_runtime_value(db, "model_error_message") or "")
+    base_text = base_text.strip() or "[error] 后端服务出现错误，请联系管理员。"
+    if bool(get_runtime_value(db, "model_error_show_detail")) and row.error:
+        detail = redact_error(row.error, 200)
+        text = f"{base_text}\n错误信息为：{detail}"
+    else:
+        text = base_text
+
+    try:
+        if row.channel == "wecom_kf":
+            sent_id = await client.send_text(account_id, external_id, text)
+            db.add(
+                Message(
+                    conversation_id=row.conversation_id,
+                    user_id=row.user_id,
+                    channel=row.channel,
+                    channel_instance_id=account_id,
+                    external_message_id=sent_id or f"local:{row.id}:error",
+                    direction=MessageDirection.outbound,
+                    message_type="text",
+                    content=text,
+                    status=MessageStatus.sent,
+                    metadata_json={"reply_to": row.external_message_id, "error_notice": True},
+                )
+            )
+        else:
+            adapter = registry.get(row.channel)
+            sent_id = await adapter.send(
+                OutgoingMessage(
+                    channel=row.channel,
+                    instance_id=account_id,
+                    to_sender_id=external_id,
+                    text=text,
+                    metadata={"reply_to": row.external_message_id, "error_notice": True},
+                )
+            )
+            db.add(
+                Message(
+                    conversation_id=row.conversation_id,
+                    user_id=row.user_id,
+                    channel=row.channel,
+                    channel_instance_id=account_id,
+                    external_message_id=sent_id or f"local:{row.id}:error",
+                    direction=MessageDirection.outbound,
+                    message_type="text",
+                    content=text,
+                    status=MessageStatus.sent,
+                    metadata_json={"reply_to": row.external_message_id, "error_notice": True},
+                )
+            )
+        db.commit()
+        return True
+    except Exception:
+        db.rollback()
+        log.exception("模型故障错误通知发送失败 message_id=%s", message_id)
+        return False
+
+
 
 async def _handle_qr_clawbot_command(db: Session, row: Message) -> dict | None:
     """处理 /qr clawbot 指令：为用户在 wechat_clawbot 渠道生成登录二维码。
@@ -959,13 +1050,19 @@ async def _handle_qr_clawbot_command(db: Session, row: Message) -> dict | None:
     try:
         state = await adapter.start_instance(instance.id)
     except Exception as exc:
+        log.warning("启动 ClawBot 登录失败 instance=%s error=%s", instance.id, redact_error(exc, 200))
         return {"text": f"启动 ClawBot 登录失败：{str(exc)[:100]}"}
     if not state:
         return {"text": "ClawBot 桥接服务返回空状态，请稍后再试。"}
     qrcode_url = (state or {}).get("qrcode_url")
     if not qrcode_url:
         return {"text": "ClawBot 未返回可登录二维码，请稍后再试或前往网页端登录。"}
-    instance.login_state = dict(state)
+    # 与 _change_channel_instance_status 一致：只存白名单字段，避免桥接侧敏感字段落库
+    instance.login_state = {
+        key: value
+        for key, value in (state or {}).items()
+        if key in {"status", "qrcode_url", "account_id", "error"}
+    }
     instance.status = "pending"
     db.commit()
 
@@ -978,6 +1075,7 @@ async def _handle_qr_clawbot_command(db: Session, row: Message) -> dict | None:
         img.save(buf, format="PNG")
         media_bytes = buf.getvalue()
     except Exception as exc:
+        log.warning("生成二维码图片失败 error=%s", redact_error(exc, 200))
         return {"text": f"生成二维码图片失败：{str(exc)[:80]}"}
 
     greeting = persona_name or "八千代"

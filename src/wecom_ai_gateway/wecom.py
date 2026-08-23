@@ -192,6 +192,8 @@ class WeComClient:
         """
         if media_type not in {"image", "voice", "file"}:
             raise ValueError(f"不支持的客服媒体类型：{media_type}")
+        if len(content) > 2 * 1024 * 1024:
+            raise ValueError("媒体内容超过 2MB 上限")
         token = await self.access_token()
         try:
             async with httpx.AsyncClient(timeout=settings.wecom_upload_timeout_seconds) as c:

@@ -3,6 +3,7 @@ import hashlib
 import os
 import struct
 
+import pytest
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 from wecom_ai_gateway.config import settings
@@ -83,3 +84,21 @@ def test_send_fail_event_marks_outbound_message_failed(database):
     assert refreshed.status == MessageStatus.failed
     assert "用户已删除会话" in (refreshed.error or "")
     db.close()
+
+
+def test_upload_media_from_bytes_rejects_oversize():
+    import asyncio
+
+    from wecom_ai_gateway.wecom import client
+
+    with pytest.raises(ValueError, match="2MB"):
+        asyncio.run(client.upload_media_from_bytes("image", b"x" * (2 * 1024 * 1024 + 1)))
+
+
+def test_upload_media_from_bytes_rejects_bad_type():
+    import asyncio
+
+    from wecom_ai_gateway.wecom import client
+
+    with pytest.raises(ValueError, match="媒体类型"):
+        asyncio.run(client.upload_media_from_bytes("pdf", b"x"))
