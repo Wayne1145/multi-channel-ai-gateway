@@ -4,7 +4,7 @@
 - 新用户 resolve_user 时自动创建并激活默认卡
 - 已有卡的同名用户不覆盖
 - ensure_default_persona_card 幂等补建
-- 种子文本与附件原文字节级一致
+- 内嵌种子文本满足稳定契约，不依赖开发者机器上的私有附件
 - providers.py 对 sensenova 模型注入 reasoning_effort=none
 - 非 sensenova 模型不注入
 """
@@ -87,11 +87,13 @@ def test_ensure_default_persona_card_is_idempotent_when_user_has_card(db):
     assert r["active_card_id"] is not None
 
 
-def test_persona_seed_text_matches_attachment_source():
-    attach = open("/home/wayne/.hermes-web-ui/upload/default/dcd8ce8a7dd39b98.md").read().lstrip("\ufeff").strip()  # noqa: SIM115
-    assert DEFAULT_PERSONA_TEXT == attach
+def test_persona_seed_text_is_self_contained_and_complete():
+    """公开仓库测试不得依赖开发者主目录中的上传附件。"""
+    assert DEFAULT_PERSONA_TEXT == DEFAULT_PERSONA_TEXT.strip()
+    assert not DEFAULT_PERSONA_TEXT.startswith("\ufeff")
     assert "月见八千代" in DEFAULT_PERSONA_TEXT
     assert "理性 60%" in DEFAULT_PERSONA_TEXT
+    assert "简体中文" in DEFAULT_PERSONA_TEXT
 
 
 @pytest.mark.anyio
