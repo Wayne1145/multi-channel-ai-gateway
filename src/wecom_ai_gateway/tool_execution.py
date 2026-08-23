@@ -7,6 +7,7 @@
 import asyncio
 import html
 import logging
+import os
 import re
 from datetime import datetime
 from typing import Any
@@ -339,7 +340,9 @@ async def _open_websearch(arguments: dict[str, Any], timeout: float) -> dict | N
     if len(query) > 200:
         raise ToolValidationError("搜索关键词不能超过 200 字符")
 
-    daemon_url = "http://127.0.0.1:3210/search"
+    daemon_url = os.environ.get(
+        "OPEN_WEBSEARCH_DAEMON_URL", "http://127.0.0.1:3210/search"
+    )
     engines = ["startpage", "bing", "sogou", "hackernews"]
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
