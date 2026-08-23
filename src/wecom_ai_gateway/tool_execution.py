@@ -5,6 +5,8 @@
 """
 
 import asyncio
+import html
+import re
 from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -14,6 +16,19 @@ import httpx
 
 class ToolValidationError(ValueError):
     """工具名或参数不符合白名单约束。"""
+
+
+_BING_RESULT_RE = re.compile(
+    r'<li class="b_algo".*?<h2[^>]*><a[^>]*href="([^"]+)"[^>]*>(.*?)</a>.*?</h2>'
+    r'(?:.*?<p[^>]*>(.*?)</p>)?',
+    re.DOTALL,
+)
+
+
+def _clean_html_fragment(raw: str) -> str:
+    """去除必应结果标题/摘要中的 HTML 标签并反转义实体。"""
+    text = re.sub(r"<[^>]+>", "", raw)
+    return html.unescape(text).strip()
 
 
 _TOOL_SCHEMAS: dict[str, dict] = {
@@ -57,6 +72,26 @@ _TOOL_SCHEMAS: dict[str, dict] = {
                     },
                 },
                 "required": ["location"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "web_search": {
+        "type": "function",
+        "function": {
+            "name": "web_search",
+            "description": "通过必应搜索互联网，返回结果标题、链接与摘要。用于查询实时新闻、最新信息或任何训练数据可能过时的问题。只读。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "搜索关键词，中文搜索建议用中文表达。",
+                        "minLength": 1,
+                        "maxLength": 200,
+                    }
+                },
+                "required": ["query"],
                 "additionalProperties": False,
             },
         },
@@ -238,6 +273,59 @@ async def _weather(arguments: dict[str, Any], timeout: float) -> dict:
     }
 
 
+async def _bing_search(arguments: dict[str, Any], timeout: float) -> dict:
+    """通过必应（固定端点）搜索互联网，返回前 5 条标题/链接/摘要。
+
+    安全：搜索端点写死为 https://www.bing.com/search，调用者只能提供 query；
+    不跟随外部链接、不抓取页面正文，只解析结果列表。中文查询走必应中国。
+    """
+    _validate_keys(arguments, {"query"})
+    query = arguments.get("query")
+    if not isinstance(query, str) or not query.strip():
+        raise ToolValidationError("搜索关键词必须是 1 到 200 字符的文本")
+    query = query.strip()
+    if len(query) > 200:
+        raise ToolValidationError("搜索关键词不能超过 200 字符")
+
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+        ),
+        "Accept-Language": "zh-CN,zh;q=0.9",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    }
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+        response = await client.get(
+            "https://www.bing.com/search",
+            params={"q": query, "mkt": "zh-CN", "ensearch": 0},
+            headers=headers,
+        )
+        response.raise_for_status()
+        page = response.text
+
+    results = []
+    for match in _BING_RESULT_RE.finditer(page):
+        url = html.unescape(match.group(1)).strip()
+        title = _clean_html_fragment(match.group(2))
+        snippet = _clean_html_fragment(match.group(3) or "")
+        # 只保留 http(s) 结果，跳过必应内部导航链接
+        if not url.startswith("http"):
+            continue
+        results.append(
+            {
+                "title": title[:200],
+                "url": url[:500],
+                "snippet": snippet[:400],
+            }
+        )
+        if len(results) >= 5:
+            break
+    if not results:
+        return {"ok": True, "query": query, "results": [], "note": "没有搜索到结果"}
+    return {"ok": True, "query": query, "results": results, "source": "Bing"}
+
+
 async def execute_tool(name: str, arguments: dict[str, Any], *, timeout: float) -> dict:
     """执行白名单只读工具，并对整个执行过程施加超时。"""
     if name not in _TOOL_SCHEMAS:
@@ -246,4 +334,6 @@ async def execute_tool(name: str, arguments: dict[str, Any], *, timeout: float) 
         raise ToolValidationError("工具超时必须在 1 到 60 秒之间")
     if name == "get_current_time":
         return _current_time(arguments)
+    if name == "web_search":
+        return await asyncio.wait_for(_bing_search(arguments, timeout), timeout=timeout)
     return await asyncio.wait_for(_weather(arguments, timeout), timeout=timeout)

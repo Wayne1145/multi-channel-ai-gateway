@@ -61,8 +61,12 @@ def test_admin_tool_catalog_is_read_only_and_reflects_runtime_settings(db):
     assert {item["name"] for item in body["catalog"]} == {
         "get_current_time",
         "get_weather",
+        "web_search",
     }
     assert all(item["read_only"] is True for item in body["catalog"])
+    # 新增工具带中文标签，管理后台可展示
+    web = next(item for item in body["catalog"] if item["name"] == "web_search")
+    assert "搜索" in web["label"]
 
 
 def test_admin_settings_put_validates_and_rejects_bad_values():

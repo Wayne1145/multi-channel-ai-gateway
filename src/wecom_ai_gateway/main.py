@@ -909,6 +909,7 @@ def admin_tools(db: Session = Depends(db_dep)):
     labels = {
         "get_current_time": "当前日期与时间",
         "get_weather": "当前天气与短期预报",
+        "web_search": "必应联网搜索（标题/链接/摘要）",
     }
     allowed = parse_tool_allowlist(str(get_runtime_value(db, "tools_allowed")))
     return {

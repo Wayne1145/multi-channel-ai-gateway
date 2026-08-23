@@ -390,3 +390,64 @@ async def test_tool_failure_is_audited_and_only_generic_error_reaches_model(db, 
 def test_runtime_settings_reject_unknown_tool_names(db):
     errors = update_settings(db, {"tools_allowed": "get_weather,run_shell"})
     assert "tools_allowed" in errors
+
+
+@respx.mock
+@pytest.mark.anyio
+async def test_web_search_tool_uses_fixed_bing_endpoint_and_parses_results():
+    """web_search 固定走必应端点，返回前 5 条标题/链接/摘要。"""
+    page = '''
+<html><body>
+<li class="b_algo"><h2><a href="https://example.com/alpha">Alpha 最新消息</a></h2>
+<div class="b_caption"><p>Alpha 公司今天发布了新产品，主打 AI 芯片。</p></div></li>
+<li class="b_algo"><h2><a href="https://example.com/beta">Beta 教程</a></h2>
+<div class="b_caption"><p>Beta 入门教程，涵盖安装与配置。</p></div></li>
+<li class="b_algo"><h2><a href="https://example.com/gamma">Gamma 分析</a></h2>
+<div class="b_caption"><p>Gamma 市场分析报告。</p></div></li>
+</body></html>
+'''
+    route = respx.get("https://www.bing.com/search").mock(
+        return_value=httpx.Response(200, text=page)
+    )
+
+    result = await execute_tool("web_search", {"query": "alpha 最新消息"}, timeout=5)
+
+    assert result["ok"] is True
+    assert result["source"] == "Bing"
+    assert len(result["results"]) == 3
+    first = result["results"][0]
+    assert first["title"] == "Alpha 最新消息"
+    assert first["url"] == "https://example.com/alpha"
+    assert "新产品" in first["snippet"]
+    # 固定端点：查询参数只能带 q/mkt/ensearch，不允许自定义 URL
+    assert route.calls.last.request.url.host == "www.bing.com"
+
+
+@respx.mock
+@pytest.mark.anyio
+async def test_web_search_rejects_bad_arguments_and_handles_no_results():
+    """参数校验：空查询/超长/多余参数都拒绝；无结果时返回空列表不报错。"""
+    with pytest.raises(ToolValidationError, match="关键词"):
+        await execute_tool("web_search", {"query": "   "}, timeout=5)
+    with pytest.raises(ToolValidationError, match="参数"):
+        await execute_tool(
+            "web_search", {"query": "a", "url": "https://evil.example"}, timeout=5
+        )
+    with pytest.raises(ToolValidationError, match="200"):
+        await execute_tool("web_search", {"query": "x" * 201}, timeout=5)
+
+    respx.get("https://www.bing.com/search").mock(
+        return_value=httpx.Response(200, text="<html><body>没有结果</body></html>")
+    )
+    result = await execute_tool("web_search", {"query": "不存在的东西"}, timeout=5)
+    assert result["ok"] is True
+    assert result["results"] == []
+
+
+def test_web_search_available_in_allowlist_schema():
+    """web_search 应出现在可用工具列表中，可被白名单选择。"""
+    from wecom_ai_gateway.tool_execution import available_tool_names
+
+    assert "web_search" in available_tool_names()
+    definitions = tool_definitions({"web_search"})
+    assert definitions[0]["function"]["name"] == "web_search"
