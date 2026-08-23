@@ -710,13 +710,6 @@ def test_sanitize_search_query_removes_noise():
 @pytest.mark.anyio
 async def test_web_search_daemon_retries_sanitized_query_on_empty():
     """daemon 首次空结果时用净化查询重试，成功则不再回退 Bing。"""
-    calls = []
-    def handler(request):
-        calls.append(request.url.params.get("query") or "N/A")
-        body = request.content
-        # 模拟：首次（原始查询）返回空；净化后返回结果
-        return httpx.Response(200, json={"status": "ok", "data": {"results": []}})
-
     # 用 respx 动态响应：第一次空，第二次有结果
     daemon_route = respx.post("http://open-websearch:3210/search")
     daemon_route.side_effect = [
