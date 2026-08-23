@@ -269,6 +269,54 @@ async def test_complete_ai_executes_structured_tool_call_and_audits(db, monkeypa
 
 @pytest.mark.anyio
 async def test_tool_loop_stops_at_configured_limit(db, monkeypatch):
+    """工具触顶后强制收尾：追加提示让模型基于已有信息作答，不再死循环重试。"""
+    update_settings(
+        db,
+        {
+            "tools_enabled": True,
+            "tools_allowed": "get_current_time",
+            "tool_max_calls": 1,
+            "tool_timeout_seconds": 5,
+        },
+    )
+    user_settings, conversation, row = _message_context(db)
+    provider = AsyncMock()
+    provider.complete.side_effect = [
+        CompletionResult(
+            content="",
+            tool_calls=[ToolCall(id="call-1", name="get_current_time", arguments="{}")],
+        ),
+        # 工具执行后模型又要求调用工具 → 触顶
+        CompletionResult(
+            content="",
+            tool_calls=[ToolCall(id="call-2", name="get_current_time", arguments="{}")],
+        ),
+        # 强制收尾调用（tools=None）：模型直接给出答案
+        CompletionResult(content="现在时间是 14:00", prompt_tokens=3, completion_tokens=2),
+    ]
+    monkeypatch.setattr(
+        "wecom_ai_gateway.services.resolve_provider",
+        Mock(return_value=("openai-compatible", "https://model.example/v1", "key")),
+    )
+    monkeypatch.setattr("wecom_ai_gateway.services.provider_for", Mock(return_value=provider))
+    monkeypatch.setattr(
+        "wecom_ai_gateway.services.execute_tool",
+        AsyncMock(return_value={"ok": True, "timezone": "Asia/Shanghai"}),
+    )
+
+    answer = await _complete_ai(db, row, conversation, user_settings)
+
+    assert answer == "现在时间是 14:00"
+    assert provider.complete.await_count == 3
+    # 第三次（收尾）调用不再携带 tools，禁止继续调用工具
+    assert provider.complete.await_args.kwargs.get("tools") is None
+    # 收尾提示已追加到消息上下文
+    assert "工具调用次数已达上限" in provider.complete.await_args.args[0][-1]["content"]
+
+
+@pytest.mark.anyio
+async def test_tool_limit_final_answer_empty_returns_friendly_text(db, monkeypatch):
+    """收尾调用仍返回空时，给出友好提示而非把失败抛给重试。"""
     update_settings(
         db,
         {
@@ -289,6 +337,7 @@ async def test_tool_loop_stops_at_configured_limit(db, monkeypatch):
             content="",
             tool_calls=[ToolCall(id="call-2", name="get_current_time", arguments="{}")],
         ),
+        CompletionResult(content="", prompt_tokens=1, completion_tokens=0),
     ]
     monkeypatch.setattr(
         "wecom_ai_gateway.services.resolve_provider",
@@ -300,14 +349,16 @@ async def test_tool_loop_stops_at_configured_limit(db, monkeypatch):
         AsyncMock(return_value={"ok": True, "timezone": "Asia/Shanghai"}),
     )
 
-    with pytest.raises(RuntimeError, match="调用次数上限"):
-        await _complete_ai(db, row, conversation, user_settings)
+    answer = await _complete_ai(db, row, conversation, user_settings)
 
-    assert provider.complete.await_count == 2
+    assert "搜索" in answer
+    assert "换一种问法" in answer
+    assert provider.complete.await_count == 3
 
 
 @pytest.mark.anyio
 async def test_tool_batch_over_limit_executes_nothing(db, monkeypatch):
+    """一批工具调用超过上限时不执行任何工具，直接进入强制收尾。"""
     update_settings(
         db,
         {
@@ -319,13 +370,16 @@ async def test_tool_batch_over_limit_executes_nothing(db, monkeypatch):
     )
     user_settings, conversation, row = _message_context(db)
     provider = AsyncMock()
-    provider.complete.return_value = CompletionResult(
-        content="",
-        tool_calls=[
-            ToolCall(id="call-1", name="get_current_time", arguments="{}"),
-            ToolCall(id="call-2", name="get_current_time", arguments="{}"),
-        ],
-    )
+    provider.complete.side_effect = [
+        CompletionResult(
+            content="",
+            tool_calls=[
+                ToolCall(id="call-1", name="get_current_time", arguments="{}"),
+                ToolCall(id="call-2", name="get_current_time", arguments="{}"),
+            ],
+        ),
+        CompletionResult(content="收尾回答", prompt_tokens=2, completion_tokens=1),
+    ]
     runner = AsyncMock()
     monkeypatch.setattr(
         "wecom_ai_gateway.services.resolve_provider",
@@ -334,11 +388,13 @@ async def test_tool_batch_over_limit_executes_nothing(db, monkeypatch):
     monkeypatch.setattr("wecom_ai_gateway.services.provider_for", Mock(return_value=provider))
     monkeypatch.setattr("wecom_ai_gateway.services.execute_tool", runner)
 
-    with pytest.raises(RuntimeError, match="调用次数上限"):
-        await _complete_ai(db, row, conversation, user_settings)
+    answer = await _complete_ai(db, row, conversation, user_settings)
 
+    assert answer == "收尾回答"
+    # 批次超限：一个工具都不执行
     runner.assert_not_awaited()
-    assert db.query(UsageRecord).count() == 1
+    # 首次调用已产生用量；收尾调用也产生用量
+    assert db.query(UsageRecord).count() == 2
 
 
 @pytest.mark.anyio

@@ -934,7 +934,41 @@ async def _complete_ai(db, row: Message, conversation: Conversation, user_settin
         if tools is None:
             raise RuntimeError("模型返回了工具调用，但平台未启用工具执行")
         if tool_call_count + len(calls) > max_tool_calls:
-            raise RuntimeError("已达到单次消息的工具调用次数上限")
+            # 工具调用次数已达上限：这不是可恢复的临时故障，重试只会重演同样的
+            # 工具调用循环。改为强制收尾——让模型基于已获得的搜索结果直接作答，
+            # 不再允许调用工具。这样用户能得到基于搜索的回答，而不是死循环重试。
+            prompts.append(
+                {
+                    "role": "user",
+                    "content": (
+                        "工具调用次数已达上限，请不要再调用任何工具，"
+                        "直接根据上面已经获得的搜索结果或已有信息，"
+                        "用一段话回答用户的问题。"
+                    ),
+                }
+            )
+            final_result = await provider_for(
+                active_provider,
+                active_base_url,
+                active_api_key,
+                timeout=timeout,
+            ).complete(prompts, active_model, temperature, max_tokens, tools=None)
+            db.add(
+                UsageRecord(
+                    user_id=row.user_id,
+                    provider=record_provider,
+                    model=active_model,
+                    prompt_tokens=final_result.prompt_tokens,
+                    completion_tokens=final_result.completion_tokens,
+                )
+            )
+            db.commit()
+            if final_result.content.strip():
+                return final_result.content
+            return (
+                "我试着搜索了一下相关信息，但暂时还没整理出满意的答案。"
+                "你可以换一种问法，或者晚点再问我一次。"
+            )
         prompts.append(
             {
                 "role": "assistant",
