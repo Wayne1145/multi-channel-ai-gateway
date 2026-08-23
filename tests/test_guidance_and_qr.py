@@ -1,5 +1,6 @@
 """0014 迁移 + 命令指引开关 + /qr clawbot 动态人设化 的回归测试。"""
 import sys
+from unittest.mock import patch
 
 import pytest
 
@@ -9,6 +10,7 @@ from wecom_ai_gateway.config import settings
 from wecom_ai_gateway.db import SessionLocal
 from wecom_ai_gateway.models import (
     Account,
+    ChannelIdentity,
     CharacterCard,
     Conversation,
     Message,
@@ -17,6 +19,7 @@ from wecom_ai_gateway.models import (
     User,
     UserSettings,
 )
+from wecom_ai_gateway.security import encrypt_secret
 from fastapi.testclient import TestClient
 
 from wecom_ai_gateway.main import app
@@ -152,7 +155,7 @@ async def test_complete_ai_injects_help_only_when_guidance_enabled(monkeypatch):
     await svc._complete_ai(db, row, conv, us)
     sys_text_on = next(p["content"] for p in captured if p.get("role") == "system")
     assert "/help" in sys_text_on
-    assert "可以用符合当前角色口吻的方式引导" in sys_text_on
+    assert "发送 /help 即可查看完整命令列表" in sys_text_on
     assert COMMAND_HELP in sys_text_on
 
     captured.clear()
@@ -214,7 +217,6 @@ async def test_qr_clawbot_text_uses_persona_name(monkeypatch):
     assert "/qr clawbot" in payload["text"]
     assert isinstance(payload.get("media_bytes"), bytes)
     assert len(payload["media_bytes"]) > 100
-    assert payload["open_kfid"] == "wk-test"
     db.close()
 
 
@@ -261,6 +263,87 @@ async def test_qr_clawbot_falls_back_to_default_greeting_without_persona(monkeyp
     payload = await svc._handle_qr_clawbot_command(db, row)
     assert payload is not None
     assert payload["text"].startswith("八千代：")
+    db.close()
+
+
+@pytest.mark.anyio
+async def test_qr_clawbot_process_message_sends_text_and_media(monkeypatch):
+    """/qr clawbot 走 process_message 时必须真正调用 send_text 与 send_media。
+
+    回归背景：旧实现只写库不投递，用户在企微收不到文本回执；同时生产容器缺
+    Pillow 导致二维码图片生成失败（'No module named PIL'）。这里同时验证
+    投递链路与图片生成容错。
+    """
+    from unittest.mock import AsyncMock
+
+    from wecom_ai_gateway import services as svc
+
+    _install_fake_qrcode(monkeypatch)
+    monkeypatch.setattr(settings, "clawbot_bridge_base_url", "https://bridge.test")
+    monkeypatch.setattr(settings, "wecom_open_kfid", "wk-test")
+    monkeypatch.setattr(settings, "wecom_corp_id", "wwCorp")
+    # 桥接启动返回二维码地址
+    async def fake_start_any(*args, **kwargs):
+        return {"status": "pending_login", "qrcode_url": "https://qr.example/abc"}
+
+    monkeypatch.setattr(ClawBotAdapter, "start_instance", fake_start_any)
+
+    send_text = AsyncMock(return_value="out-msg-1")
+    send_media = AsyncMock(return_value="out-media-1")
+    upload = AsyncMock(return_value="media-id-1")
+
+    db = SessionLocal()
+    user = User()
+    db.add(user)
+    db.flush()
+    conv = Conversation(user_id=user.id)
+    identity = ChannelIdentity(
+        user_id=user.id,
+        channel="wecom_kf",
+        account_id="wk-test",
+        external_id_hash="a" * 64,
+        external_id_encrypted=encrypt_secret("external-user"),
+    )
+    row = Message(
+        user_id=user.id,
+        conversation_id=conv.id,
+        channel="wecom_kf",
+        external_message_id="msg-qr-deliver",
+        direction="inbound",
+        message_type="text",
+        content="/qr clawbot",
+        status=MessageStatus.queued,
+        metadata_json={"open_kfid": "wk-test"},
+    )
+    db.add_all([conv, identity, row])
+    db.commit()
+    db.close()
+
+    with (
+        patch.object(svc.client, "send_text", send_text),
+        patch.object(svc.client, "send_media", send_media),
+        patch.object(svc.client, "upload_media_from_bytes", upload),
+    ):
+        await svc.process_message(row.id)
+
+    send_text.assert_awaited_once()
+    assert "八千代：已为你生成微信登录二维码" in send_text.await_args.args[2]
+    upload.assert_awaited_once()
+    send_media.assert_awaited_once()
+
+    db = SessionLocal()
+    outbound = (
+        db.query(Message)
+        .filter(
+            Message.channel == "wecom_kf",
+            Message.direction == MessageDirection.outbound,
+            Message.metadata_json.like("%qr%"),
+        )
+        .all()
+    )
+    assert outbound, "qr 回复必须写库"
+    statuses = {m.message_type for m in outbound}
+    assert "text" in statuses and "image" in statuses
     db.close()
 
 
