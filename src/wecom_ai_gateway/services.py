@@ -679,6 +679,13 @@ async def _complete_ai(db, row: Message, conversation: Conversation, user_settin
     # 图片消息：绕过 SenseNova（非多模态），强制走备用 DeepSeek 多模态线路。
     # 这样用户发图时直接由 vision 模型回答，SenseNova 不会因无法理解图片而空回复。
     image_payload = await _image_media_payload(db, row)
+    # 消息本身是图片类型（即使下载失败也算图片消息），不能降级为纯文本走主线路
+    has_image_message = row.message_type == "image" or "image" in (row.metadata_json or {}).get(
+        "media_types", []
+    )
+    if has_image_message and image_payload is None:
+        log.warning("图片消息无法获取图片内容（下载失败或无素材），按看不了处理 message=%s", row.id)
+        return "抱歉，我暂时看不了这张图片，请用文字描述一下内容。"
     vision_forced = image_payload is not None
     if vision_forced and not (settings.fallback_base_url and settings.fallback_api_key and settings.fallback_model):
         log.warning("收到图片消息但未配置多模态备用线路，无法回复 user=%s", row.user_id)

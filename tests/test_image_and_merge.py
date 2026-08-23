@@ -19,6 +19,7 @@ from wecom_ai_gateway.models import (
     Message,
     MessageStatus,
     User,
+    UserSettings,
 )
 from wecom_ai_gateway.security import encrypt_secret
 from wecom_ai_gateway.services import ingest
@@ -159,6 +160,68 @@ async def test_image_message_routes_to_vision_model_bypassing_sensenova(db, monk
     assert "sensenova" not in base_url
     send_text.assert_awaited_once()
     assert "我看到图片了" in send_text.await_args.args[2]
+
+
+@pytest.mark.anyio
+async def test_image_download_failure_falls_back_to_friendly_text(db, monkeypatch):
+    """图片消息下载失败时给出友好提示，而不是当纯文本走主线路。"""
+    from wecom_ai_gateway import services as svc
+
+    monkeypatch.setattr(settings, "fallback_model", "deepseek-v4-flash-vision-exp")
+    monkeypatch.setattr(settings, "fallback_base_url", "https://api.deepseek.com/v1")
+    monkeypatch.setattr(settings, "fallback_api_key", "fallback-key")
+
+    user_id, account_id = _setup_user(db)
+    conversation = Conversation(user_id=user_id)
+    db.add(conversation)
+    db.flush()
+    row = Message(
+        user_id=user_id,
+        conversation_id=conversation.id,
+        channel="wecom_kf",
+        channel_instance_id=account_id,
+        external_message_id="img-fail-1",
+        direction="inbound",
+        message_type="image",
+        content=None,
+        status=MessageStatus.processing,
+        metadata_json={"open_kfid": account_id, "media_types": ["image"], "media_count": 1},
+    )
+    db.add(row)
+    db.flush()
+    db.add(
+        MediaAsset(
+            message_id=row.id,
+            channel="wecom_kf",
+            media_type="image",
+            mime="image/jpeg",
+            storage_key="media-bad-id",
+            status="stored",
+            expires_at=datetime.now(UTC) + timedelta(hours=1),
+        )
+    )
+    db.commit()
+    db.close()
+
+    # 下载失败（假 media_id）→ 应返回友好提示，且不调用任何模型
+    from wecom_ai_gateway.providers import OpenAICompatibleProvider
+
+    called = []
+    monkeypatch.setattr(
+        OpenAICompatibleProvider,
+        "complete",
+        lambda self, messages, model, temperature, max_tokens, **kw: called.append(model),
+    )
+    monkeypatch.setattr(svc.client, "download_media", AsyncMock(side_effect=RuntimeError("invalid media_id")))
+
+    db = SessionLocal()
+    row = db.get(Message, row.id)
+    us = db.get(UserSettings, user_id)
+    answer = await svc._complete_ai(db, row, conversation, us)
+    db.close()
+
+    assert "看不了" in answer
+    assert called == [], "图片下载失败不应调用任何模型"
 
 
 @pytest.mark.anyio
