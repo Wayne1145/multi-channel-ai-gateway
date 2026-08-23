@@ -201,6 +201,9 @@ def ingest_channel_message(db, incoming: ChannelMessage) -> Message | None:
     content = incoming.content
     if incoming.message_type == "text" and content:
         content = content[: int(get_effective_value(db, "message_max_chars", channel=incoming.channel))]
+    # 图片消息用占位文本入库（同 ingest），保证后续文字消息上下文能看到“用户发过一张图”
+    if incoming.message_type == "image" and not content:
+        content = "[图片]"
     user = resolve_user(db, incoming.sender_id, incoming.instance_id, incoming.channel)
     conversation = active_conversation(db, user.id)
     media = [m for m in (incoming.media or []) if isinstance(m, dict)]
@@ -258,6 +261,10 @@ def ingest(db, item: dict) -> None:
     content = (item.get("text") or {}).get("content") if msgtype == "text" else None
     if content:
         content = content[: int(get_effective_value(db, "message_max_chars", channel="wecom_kf"))]
+    # 图片消息用占位文本入库，保证后续文字消息的 history 上下文能看到“用户发过一张图”，
+    # 否则 content=None 会让下一条消息的模型误以为看到空白消息、自行编造“看不了图”。
+    if msgtype == "image" and not content:
+        content = "[图片]"
     # 企微媒体消息：image/voice/file 的 media_id 嵌套在对应 msgtype 字段里
     # （如 {"msgtype":"image","image":{"media_id":"...","format":"png"}}），
     # 顶层没有 media_id。按 msgtype 提取后仅记录安全元数据。

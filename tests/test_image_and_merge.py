@@ -91,6 +91,32 @@ def test_wecom_image_nested_media_id_is_extracted(db):
     media = db.query(MediaAsset).filter_by(message_id=row.id).one()
     assert media.storage_key == "NESTED_MEDIA_123", "必须从嵌套 image 字段取 media_id"
     assert media.mime == "png"
+    # 图片消息必须有占位 content，后续文字消息上下文才能看到“用户发过图”
+    assert row.content == "[图片]"
+
+
+def test_image_message_content_placeholder_keeps_context(db):
+    """图片消息入库 content 用 [图片] 占位，避免后续文字消息看到空白上下文。
+
+    回归：图片消息 content=None 时，用户随后追问的文字消息在 history 里看到
+    一条空白 user 消息，模型误以为又是一张看不了的图，编造“看不了图片”回复。
+    """
+    _user_id, _account_id = _setup_user(db)
+    with patch("wecom_ai_gateway.services.encrypt_secret", side_effect=lambda v: f"enc:{v}"):
+        ingest(
+            db,
+            {
+                "msgid": "img-placeholder-1",
+                "open_kfid": "wkImageAccount",
+                "external_userid": "wmImageUser",
+                "msgtype": "image",
+                "origin": 3,
+                "image": {"media_id": "PH_MEDIA_1", "format": "png"},
+            },
+        )
+        db.commit()
+    row = db.query(Message).filter_by(external_message_id="img-placeholder-1").one()
+    assert row.content == "[图片]"
 
 
 def test_voice_message_still_ignored(db):
