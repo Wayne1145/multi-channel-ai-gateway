@@ -2253,6 +2253,41 @@ def import_user_card(user_id: str, body: CardImportIn, db: Session = Depends(db_
     }
 
 
+@app.post("/api/admin/users/persona-seed/backfill", dependencies=[Depends(admin)])
+def admin_backfill_persona_seed(db: Session = Depends(db_dep)):
+    """批量为尚无角色卡的用户补建「月见八千代」默认卡并激活。
+
+    幂等：已有任意角色卡的用户跳过；返回每用户处理结果与审计日志。
+    """
+    from .services import ensure_default_persona_card as _seed
+
+    users = list(db.scalars(select(User)).all())
+    results = []
+    for u in users:
+        try:
+            r = _seed(db, u.id)
+            results.append({"user_id": u.id, **r})
+        except Exception as exc:  # noqa: BLE001
+            results.append({"user_id": u.id, "error": str(exc)})
+            db.rollback()
+    db.add(
+        AuditLog(
+            action="admin.backfill_persona_seed",
+            actor_id=None,
+            target_id="__all_users__",
+            detail={"total": len(users), "created": sum(1 for r in results if r.get("created"))},
+        )
+    )
+    db.commit()
+    return {
+        "ok": True,
+        "total": len(users),
+        "created": sum(1 for r in results if r.get("created")),
+        "skipped": sum(1 for r in results if not r.get("created") and not r.get("error")),
+        "results": results,
+    }
+
+
 @app.get("/api/admin/users/{user_id}/policies", dependencies=[Depends(admin)])
 def user_policies(user_id: str, db: Session = Depends(db_dep)):
     rows = db.scalars(

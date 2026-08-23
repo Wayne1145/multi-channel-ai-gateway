@@ -56,6 +56,11 @@ class OpenAICompatibleProvider:
             "max_tokens": max_tokens,
             "stream": False,
         }
+        # SenseNova 6.8 Flash-Lite 默认会进入长推理并把响应预算耗尽，返回空 content；
+        # 显式关闭推理可稳定拿到直接文本输出，同时避免 thinking 预算吃满。
+        # 仅对 SenseNova 系模型生效，不影响 DeepSeek 等供应商。
+        if model and model.startswith("sensenova"):
+            payload["reasoning_effort"] = "none"
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"

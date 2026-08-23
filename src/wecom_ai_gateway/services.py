@@ -27,6 +27,7 @@ from .models import (
     UserProvider,
     UserSettings,
 )
+from .persona_seed import DEFAULT_PERSONA_FORMAT, DEFAULT_PERSONA_NAME, DEFAULT_PERSONA_TEXT
 from .policy import get_command_decision, normalize_command
 from .providers import provider_for
 from .redaction import redact_error
@@ -68,8 +69,59 @@ def resolve_user(db, external_id: str, account_id: str, channel: str = "wecom_kf
         )
     )
     db.add(UserSettings(user_id=user.id))
+    _ensure_default_persona_card(db, user)
     db.flush()
     return user
+
+
+def _ensure_default_persona_card(db: Session, user: User) -> None:
+    """首次识别新用户时，自动创建并激活一张「月见八千代」默认角色卡。
+
+    已有任意角色卡的用户不再覆盖——只为新用户播种一次。
+    """
+    existing = db.scalar(
+        select(func.count()).select_from(CharacterCard).where(CharacterCard.user_id == user.id)
+    )
+    if existing and existing > 0:
+        return
+    card = CharacterCard(
+        user_id=user.id,
+        name=DEFAULT_PERSONA_NAME,
+        format=DEFAULT_PERSONA_FORMAT,
+        content_encrypted=card_service.encrypt_card_content(DEFAULT_PERSONA_TEXT),
+    )
+    db.add(card)
+    db.flush()
+    user_settings = db.get(UserSettings, user.id)
+    if user_settings is not None:
+        user_settings.active_card_id = card.id
+
+
+def ensure_default_persona_card(db: Session, user_id: str) -> dict:
+    """显式给用户补建默认角色卡（管理员批量补建、自助回补用）。
+
+    已有任意角色卡的用户不覆盖，直接返回当前状态。
+    返回 {created, active_card_id} 供调用方判定。
+    """
+    existing = db.scalar(
+        select(func.count()).select_from(CharacterCard).where(CharacterCard.user_id == user_id)
+    )
+    if (existing or 0) > 0:
+        us = db.get(UserSettings, user_id)
+        return {"created": False, "active_card_id": us.active_card_id if us else None}
+    card = CharacterCard(
+        user_id=user_id,
+        name=DEFAULT_PERSONA_NAME,
+        format=DEFAULT_PERSONA_FORMAT,
+        content_encrypted=card_service.encrypt_card_content(DEFAULT_PERSONA_TEXT),
+    )
+    db.add(card)
+    db.flush()
+    us = db.get(UserSettings, user_id) or UserSettings(user_id=user_id)
+    us.active_card_id = card.id
+    db.add(us)
+    db.flush()
+    return {"created": True, "active_card_id": card.id}
 
 
 def active_conversation(db, user_id: str) -> Conversation:
