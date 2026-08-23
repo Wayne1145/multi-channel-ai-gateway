@@ -109,7 +109,8 @@ def test_generic_channel_ingest_records_media_for_non_text_message(db):
     row = ingest_channel_message(db, incoming)
     db.commit()
     assert row is not None
-    assert row.status == "ignored"
+    # 图片消息可回复（走多模态模型），因此进入 queued；语音/文件仍为 ignored
+    assert row.status == "queued"
     assets = db.query(MediaAsset).filter_by(message_id=row.id).all()
     assert len(assets) == 1
     assert assets[0].media_type == "image"

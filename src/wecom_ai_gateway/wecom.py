@@ -210,5 +210,31 @@ class WeComClient:
             raise RuntimeError(f"media/upload failed: {d.get('errcode')} {d.get('errmsg')}")
         return d["media_id"]
 
+    async def download_media(self, media_id: str) -> bytes:
+        """按 media_id 下载企微临时素材，返回原始字节。
+
+        用于把用户发来的图片传给多模态模型。media_id 仅来自企微 API
+        （同步消息或回调），不接受外部输入，避免任意文件读取。
+        """
+        if not media_id or not isinstance(media_id, str) or len(media_id) > 200:
+            raise ValueError("无效的 media_id")
+        token = await self.access_token()
+        try:
+            async with httpx.AsyncClient(timeout=settings.wecom_upload_timeout_seconds) as c:
+                r = await c.get(
+                    "https://qyapi.weixin.qq.com/cgi-bin/media/get",
+                    params={"access_token": token, "media_id": media_id},
+                )
+                r.raise_for_status()
+                # 企微失败时返回 JSON 错误体；成功时返回二进制
+                content_type = r.headers.get("content-type", "")
+                if "application/json" in content_type or "text/" in content_type:
+                    d = r.json()
+                    if d.get("errcode"):
+                        raise RuntimeError(f"media/get failed: {d.get('errcode')} {d.get('errmsg')}")
+                return r.content
+        except httpx.HTTPError as exc:
+            raise RuntimeError(redact_error(exc)) from exc
+
 
 client = WeComClient()

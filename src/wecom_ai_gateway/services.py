@@ -1,3 +1,4 @@
+import base64
 import json
 import logging
 from datetime import UTC, datetime
@@ -12,6 +13,7 @@ from .commands import execute, memory_text
 from .config import settings
 from .db import SessionLocal
 from .media import record_media_items
+from .model_routing import _is_failover_error
 from .models import (
     AuditLog,
     ChannelIdentity,
@@ -19,6 +21,7 @@ from .models import (
     ChannelState,
     CharacterCard,
     Conversation,
+    MediaAsset,
     Memory,
     Message,
     MessageDirection,
@@ -35,7 +38,6 @@ from .redaction import redact_error
 from .runtime_settings import get_effective_value, get_runtime_value
 from .security import decrypt_secret, encrypt_secret, external_id_hash
 from .tasks import add_message_task
-from .model_routing import _is_failover_error
 from .tool_execution import (
     ToolValidationError,
     execute_tool,
@@ -202,9 +204,10 @@ def ingest_channel_message(db, incoming: ChannelMessage) -> Message | None:
     user = resolve_user(db, incoming.sender_id, incoming.instance_id, incoming.channel)
     conversation = active_conversation(db, user.id)
     media = [m for m in (incoming.media or []) if isinstance(m, dict)]
+    # 文本与图片消息都可回复：图片走多模态模型；语音/文件暂不进入 AI 回复。
+    replyable_types = {"text", "image"}
     should_reply = (
-        incoming.message_type == "text"
-        and bool(content)
+        incoming.message_type in replyable_types
         and not user.is_blocked
     )
     row = Message(
@@ -259,7 +262,10 @@ def ingest(db, item: dict) -> None:
     media: list[dict] = []
     if msgtype in {"image", "voice", "file"}:
         media = [{"media_type": msgtype, "media_id": item.get("media_id"), "mime": item.get("format")}]
-    should_reply = origin == 3 and msgtype == "text" and user and not user.is_blocked
+    # 文本与图片消息都可回复：图片走多模态模型（DeepSeek vision），
+    # 语音/文件暂不进入 AI 回复（渠道差异大、易踩存储红线）。
+    replyable_types = {"text", "image"}
+    should_reply = origin == 3 and msgtype in replyable_types and user and not user.is_blocked
     row = Message(
         conversation_id=conversation.id if conversation else None,
         user_id=user.id if user else None,
@@ -318,6 +324,13 @@ async def process_message(message_id: str) -> None:
         MessageStatus.failed,
         MessageStatus.processing,
     }:
+        db.close()
+        return
+    # 已被其他消息合并回复：跳过独立处理，标记 sent（任务正常完成，不再重试）
+    if (row.metadata_json or {}).get("merged_into"):
+        row.status = MessageStatus.sent
+        row.error = None
+        db.commit()
         db.close()
         return
     row.status = MessageStatus.processing
@@ -459,6 +472,13 @@ async def process_message(message_id: str) -> None:
         elif bool(get_runtime_value(db, "maintenance_mode")) and not settings.single_user_mode:
             answer = str(get_runtime_value(db, "maintenance_message"))
         else:
+            # 连发多条消息合并：把同会话尚未回复的兄弟消息抢入本次 AI 调用
+            merged_count = _merge_pending_messages(db, row)
+            if merged_count:
+                log.info(
+                    "合并 %s 条未回复消息一起回复 message=%s conversation=%s",
+                    merged_count, row.id, row.conversation_id,
+                )
             answer = await _complete_ai(db, row, conversation, user_settings)
 
         metadata = dict(row.metadata_json or {})
@@ -589,6 +609,8 @@ async def process_message(message_id: str) -> None:
         row.status = MessageStatus.sent
         row.error = None
         db.commit()
+        # 主消息已回复：被合并的兄弟消息标记 sent，不再单独回复
+        _release_merged_messages(db, row)
     except Exception as exc:
         # flush/commit 失败后 Session 必须先回滚，才能安全持久化失败状态。
         db.rollback()
@@ -597,13 +619,70 @@ async def process_message(message_id: str) -> None:
             row.status = MessageStatus.failed
             row.error = redact_error(exc, 1000)
             db.commit()
+        # 主消息失败：被合并的兄弟消息恢复 queued，等后续重试继续处理
+        try:
+            _restore_merged_messages(db, row)
+        except Exception:
+            log.exception("恢复被合并消息失败 message=%s", message_id)
         log.error("处理消息失败 id=%s error=%s", message_id, redact_error(exc, 300))
         raise
     finally:
         db.close()
 
 
+async def _image_media_payload(db: Session, row: Message) -> list[dict] | None:
+    """返回当前消息关联图片的多模态 content 片段。
+
+    从 MediaAsset 记录读取 media_id（storage_key），通过企微下载为字节，
+    转 base64 data URL，构造 OpenAI 多模态 content 项：
+    [{"type": "text", "text": ...}, {"type": "image_url", "image_url": {"url": "data:image/...;base64,..."}}]
+    无图片或下载失败时返回 None（由调用方决定兜底文本）。
+    """
+    assets = list(
+        db.scalars(
+            select(MediaAsset).where(
+                MediaAsset.message_id == row.id,
+                MediaAsset.media_type == "image",
+                MediaAsset.status == "stored",
+            )
+        )
+    )
+    if not assets:
+        return None
+    parts: list[dict] = []
+    text = (row.content or "").strip()
+    if text:
+        parts.append({"type": "text", "text": text})
+    for asset in assets:
+        media_id = asset.storage_key
+        if not media_id:
+            continue
+        try:
+            data = await client.download_media(str(media_id))
+        except Exception as exc:  # noqa: BLE001 - 图片下载失败降级为文本描述，不让单张图片阻塞整条消息
+            log.warning("图片下载失败 media_id=%s error=%s", media_id, redact_error(exc, 200))
+            continue
+        if not data:
+            continue
+        mime = asset.mime or "image/jpeg"
+        b64 = base64.b64encode(data).decode("ascii")
+        parts.append(
+            {
+                "type": "image_url",
+                "image_url": {"url": f"data:{mime};base64,{b64}"},
+            }
+        )
+    return parts if parts else None
+
+
 async def _complete_ai(db, row: Message, conversation: Conversation, user_settings: UserSettings) -> str:
+    # 图片消息：绕过 SenseNova（非多模态），强制走备用 DeepSeek 多模态线路。
+    # 这样用户发图时直接由 vision 模型回答，SenseNova 不会因无法理解图片而空回复。
+    image_payload = await _image_media_payload(db, row)
+    vision_forced = image_payload is not None
+    if vision_forced and not (settings.fallback_base_url and settings.fallback_api_key and settings.fallback_model):
+        log.warning("收到图片消息但未配置多模态备用线路，无法回复 user=%s", row.user_id)
+        return "抱歉，我暂时还看不了图片，请用文字描述一下内容。"
     # BYOK 始终直连用户自己的供应商；其余用户优先走平台默认模型组，
     # 未配置模型组时兼容回退到原有 .env 单供应商。
     provider_name, base_url, api_key = resolve_provider(db, user_settings)
@@ -615,8 +694,8 @@ async def _complete_ai(db, row: Message, conversation: Conversation, user_settin
     if selected_group_id and not selected_routes:
         selected_group_id = None
         selected_routes = active_routes(db)
-    use_model_group = not is_byok and bool(selected_routes)
-    if not use_model_group and not api_key:
+    use_model_group = not is_byok and bool(selected_routes) and not vision_forced
+    if not use_model_group and not api_key and not vision_forced:
         return settings.unconfigured_model_message
 
     status = quota_status(db, row.user_id, user_settings)
@@ -702,7 +781,13 @@ async def _complete_ai(db, row: Message, conversation: Conversation, user_settin
             "content": message.content or "",
         }
         for message in history
+        if message.id != row.id  # 当前消息内容单独构造（可能带图片）
     )
+    # 当前消息：带图片时用多模态 content 数组，纯文本时保持字符串
+    if vision_forced:
+        prompts.append({"role": "user", "content": image_payload})
+    else:
+        prompts.append({"role": "user", "content": row.content or ""})
     tools = None
     if bool(get_runtime_value(db, "tools_enabled")):
         allowed_tools = parse_tool_allowlist(str(get_runtime_value(db, "tools_allowed")))
@@ -724,6 +809,7 @@ async def _complete_ai(db, row: Message, conversation: Conversation, user_settin
     tool_call_count = 0
     # 平台默认线路的备用供应商：主线路超时/5xx/429/空回复时自动切换，保证
     # 一个服务不可用时另一个能接上。BYOK 用户不参与（自带密钥，禁止静默消耗平台额度）。
+    # 图片消息强制使用备用多模态线路（fallback_model 应为 vision 模型）。
     fallback_configured = bool(
         not is_byok
         and settings.fallback_base_url
@@ -736,6 +822,13 @@ async def _complete_ai(db, row: Message, conversation: Conversation, user_settin
     active_model = model
     record_provider = provider_name
     fallback_hit = False
+    if vision_forced:
+        # 图片必须走多模态：直接锁定备用线路，不经过 SenseNova 模型组。
+        active_provider = "openai-compatible"
+        active_base_url = settings.fallback_base_url
+        active_api_key = settings.fallback_api_key
+        active_model = settings.fallback_model
+        record_provider = "openai-compatible(vision)"
     while True:
         if use_model_group:
             from .model_routing import complete_with_routing
@@ -873,6 +966,100 @@ async def _complete_ai(db, row: Message, conversation: Conversation, user_settin
                     "content": json.dumps(tool_result, ensure_ascii=False)[:8000],
                 }
             )
+
+
+def _merge_pending_messages(db: Session, row: Message, limit: int = 10) -> int:
+    """把同一会话中尚未回复的兄弟消息合并进当前消息的处理。
+
+    用户连发多条消息时，若逐条回复会得到碎片化、顺序错乱的回答。这里把
+    同会话、同用户、仍处于 queued 的入站消息原子抢占为 processing 并标记
+    merged_into 指向当前消息，使它们进入 _complete_ai 的 history 上下文，
+    由一次 AI 调用统一回复。返回实际抢占条数。
+    """
+    from sqlalchemy import update
+
+    sibling_ids = list(
+        db.scalars(
+            select(Message.id)
+            .where(
+                Message.conversation_id == row.conversation_id,
+                Message.user_id == row.user_id,
+                Message.direction == MessageDirection.inbound,
+                Message.status == MessageStatus.queued,
+                Message.id != row.id,
+            )
+            .order_by(Message.created_at)
+            .limit(limit)
+        )
+    )
+    if not sibling_ids:
+        return 0
+    # 原子抢占：只有仍为 queued 的行会被更新，避免两个 Worker 同时合并同一批消息
+    db.execute(
+        update(Message)
+        .where(Message.id.in_(sibling_ids), Message.status == MessageStatus.queued)
+        .values(status=MessageStatus.processing)
+        .execution_options(synchronize_session=False)
+    )
+    claimed = list(
+        db.scalars(select(Message).where(Message.id.in_(sibling_ids)))
+    )
+    for m in claimed:
+        meta = dict(m.metadata_json or {})
+        meta["merged_into"] = row.id
+        m.metadata_json = meta
+    db.commit()
+    return len(claimed)
+
+
+def _release_merged_messages(db: Session, main_row: Message) -> None:
+    """主消息成功回复后，把被合并的兄弟消息标记为 sent（不再单独回复）。
+
+    被合并消息自己的 Outbox 任务执行时会因 status=sent 直接跳过。
+    """
+    from sqlalchemy import update
+
+    merged_ids = list(
+        db.scalars(
+            select(Message.id).where(
+                Message.conversation_id == main_row.conversation_id,
+                Message.user_id == main_row.user_id,
+                Message.status == MessageStatus.processing,
+                Message.id != main_row.id,
+            )
+        )
+    )
+    if not merged_ids:
+        return
+    db.execute(
+        update(Message)
+        .where(Message.id.in_(merged_ids))
+        .values(status=MessageStatus.sent, error=None)
+        .execution_options(synchronize_session=False)
+    )
+    db.commit()
+
+
+def _restore_merged_messages(db: Session, main_row: Message) -> None:
+    """主消息处理失败时，把被合并的兄弟消息恢复为 queued，等待后续重试。"""
+    from sqlalchemy import update
+
+    merged_ids = list(
+        db.scalars(
+            select(Message.id).where(
+                Message.metadata_json["merged_into"].as_string() == main_row.id,
+            )
+        )
+    )
+    if not merged_ids:
+        return
+    db.execute(
+        update(Message)
+        .where(Message.id.in_(merged_ids))
+        .values(status=MessageStatus.queued)
+        .execution_options(synchronize_session=False)
+    )
+    db.commit()
 
 
 def _deliver_reply(db: Session, conversation, row: Message, content: str) -> None:
@@ -1049,7 +1236,7 @@ async def _handle_qr_clawbot_command(db: Session, row: Message) -> dict | None:
 
     try:
         state = await adapter.start_instance(instance.id)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - 桥接失败转为用户可见提示，不向用户暴露堆栈
         log.warning("启动 ClawBot 登录失败 instance=%s error=%s", instance.id, redact_error(exc, 200))
         return {"text": f"启动 ClawBot 登录失败：{str(exc)[:100]}"}
     if not state:
@@ -1067,6 +1254,7 @@ async def _handle_qr_clawbot_command(db: Session, row: Message) -> dict | None:
     db.commit()
 
     import io
+
     import qrcode
 
     buf = io.BytesIO()
@@ -1074,7 +1262,7 @@ async def _handle_qr_clawbot_command(db: Session, row: Message) -> dict | None:
         img = qrcode.make(qrcode_url)
         img.save(buf, format="PNG")
         media_bytes = buf.getvalue()
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - 二维码渲染失败转为用户可见提示
         log.warning("生成二维码图片失败 error=%s", redact_error(exc, 200))
         return {"text": f"生成二维码图片失败：{str(exc)[:80]}"}
 
