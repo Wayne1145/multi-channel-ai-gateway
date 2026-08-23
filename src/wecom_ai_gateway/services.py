@@ -258,10 +258,19 @@ def ingest(db, item: dict) -> None:
     content = (item.get("text") or {}).get("content") if msgtype == "text" else None
     if content:
         content = content[: int(get_effective_value(db, "message_max_chars", channel="wecom_kf"))]
-    # 企微媒体消息：image/voice/file 携带 media_id 等定位信息，仅记录安全元数据
+    # 企微媒体消息：image/voice/file 的 media_id 嵌套在对应 msgtype 字段里
+    # （如 {"msgtype":"image","image":{"media_id":"...","format":"png"}}），
+    # 顶层没有 media_id。按 msgtype 提取后仅记录安全元数据。
     media: list[dict] = []
     if msgtype in {"image", "voice", "file"}:
-        media = [{"media_type": msgtype, "media_id": item.get("media_id"), "mime": item.get("format")}]
+        sub = item.get(msgtype) or {}
+        media = [
+            {
+                "media_type": msgtype,
+                "media_id": sub.get("media_id") or item.get("media_id"),
+                "mime": sub.get("format") or item.get("format"),
+            }
+        ]
     # 文本与图片消息都可回复：图片走多模态模型（DeepSeek vision），
     # 语音/文件暂不进入 AI 回复（渠道差异大、易踩存储红线）。
     replyable_types = {"text", "image"}
@@ -1269,7 +1278,7 @@ async def _handle_qr_clawbot_command(db: Session, row: Message) -> dict | None:
         img = qrcode.make(qrcode_url)
         img.save(buf, format="PNG")
         media_bytes = buf.getvalue()
-    except Exception as exc:  # noqa: BLE001 - 二维码渲染失败转为用户可见提示
+    except Exception as exc:  # noqa: BLE001, RUF100 - 二维码渲染失败转为用户可见提示
         log.warning("生成二维码图片失败 error=%s", redact_error(exc, 200))
         return {"text": f"生成二维码图片失败：{str(exc)[:80]}"}
 

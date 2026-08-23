@@ -65,6 +65,34 @@ def test_image_message_is_queued_for_reply(db):
     assert media.storage_key == "media-abc123"
 
 
+def test_wecom_image_nested_media_id_is_extracted(db):
+    """企微客服图片消息的 media_id 嵌套在 msgtype 字段里，必须正确提取。
+
+    回归：旧实现用 item.get('media_id') 顶层取，storage_key 恒为 None，
+    导致图片无法下载、用户收到'看不了图片'。企微格式为
+    {"msgtype":"image","image":{"media_id":"...","format":"png"}}。
+    """
+    _user_id, _account_id = _setup_user(db)
+    with patch("wecom_ai_gateway.services.encrypt_secret", side_effect=lambda v: f"enc:{v}"):
+        ingest(
+            db,
+            {
+                "msgid": "img-nested-1",
+                "open_kfid": "wkImageAccount",
+                "external_userid": "wmImageUser",
+                "msgtype": "image",
+                "origin": 3,
+                "image": {"media_id": "NESTED_MEDIA_123", "format": "png"},
+            },
+        )
+        db.commit()
+    row = db.query(Message).filter_by(external_message_id="img-nested-1").one()
+    assert row.status == MessageStatus.queued
+    media = db.query(MediaAsset).filter_by(message_id=row.id).one()
+    assert media.storage_key == "NESTED_MEDIA_123", "必须从嵌套 image 字段取 media_id"
+    assert media.mime == "png"
+
+
 def test_voice_message_still_ignored(db):
     """语音/文件消息仍不进入 AI 回复。"""
     _user_id, _account_id = _setup_user(db)
