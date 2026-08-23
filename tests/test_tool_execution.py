@@ -507,3 +507,188 @@ def test_web_search_available_in_allowlist_schema():
     assert "web_search" in available_tool_names()
     definitions = tool_definitions({"web_search"})
     assert definitions[0]["function"]["name"] == "web_search"
+
+
+def test_improve_bing_query_protects_chinese_phrases():
+    """查询改写：无空格中文长查询加引号保护，停用词/英文/已构造查询不动。"""
+    from wecom_ai_gateway.tool_execution import _improve_bing_query
+
+    assert _improve_bing_query("广东东方Project同人展") == '"广东东方Project同人展"'
+    assert _improve_bing_query("东方project 广州 同人展 2025") == '"东方project" "广州" "同人展" 2025'
+    assert _improve_bing_query("2026年 人工智能 最新进展") == '"2026年" "人工智能" "最新进展"'
+    # 停用词子串：不整体加引号，避免括死
+    assert _improve_bing_query("今天新闻") == "今天新闻"
+    # 英文原样
+    assert _improve_bing_query("python tutorial") == "python tutorial"
+    # 已精确构造的查询不动
+    assert _improve_bing_query('"exact phrase" test') == '"exact phrase" test'
+    assert _improve_bing_query("site:github.com react") == "site:github.com react"
+
+
+def test_sensenova_usage_excluded_from_quota(db):
+    """SenseNova 用量不计入每日配额，只有 DeepSeek 等计费线路计入。"""
+    from datetime import UTC, datetime
+
+    from wecom_ai_gateway.models import UsageRecord, User, UserSettings
+    from wecom_ai_gateway.runtime_settings import update_settings
+    from wecom_ai_gateway.services import quota_status
+
+    update_settings(db, {"daily_quota_enabled": True, "user_daily_token_quota": 1000})
+    user = User()
+    db.add(user)
+    db.flush()
+    us = UserSettings(user_id=user.id, daily_token_quota=1000)
+    db.add(us)
+    now = datetime.now(UTC)
+    # SenseNova 用量（不计入）
+    db.add_all([
+        UsageRecord(user_id=user.id, provider="Sensenova 主线路", model="sensenova-6.8-flash-lite",
+                    prompt_tokens=600, completion_tokens=200, created_at=now),
+        UsageRecord(user_id=user.id, provider="Sensenova 主线路", model="sensenova-6.8-flash-lite",
+                    prompt_tokens=500, completion_tokens=100, created_at=now),
+        # DeepSeek 用量（计入）
+        UsageRecord(user_id=user.id, provider="openai-compatible(fallback)", model="deepseek-v4-flash-vision-exp",
+                    prompt_tokens=400, completion_tokens=100, created_at=now),
+    ])
+    db.commit()
+
+    status = quota_status(db, user.id, us)
+    # 只有 DeepSeek 的 500 计入，SenseNova 的 1400 不计
+    assert status["used"] == 500
+    assert status["exceeded"] is False
+
+
+@pytest.mark.anyio
+async def test_tool_limit_on_primary_fails_over_to_fallback_model(db, monkeypatch):
+    """主线路（SenseNova）工具触顶时切 DeepSeek 重新处理，DeepSeek 一次答完。"""
+    from wecom_ai_gateway.config import settings as cfg
+
+    monkeypatch.setattr(cfg, "fallback_model", "deepseek-v4-flash-vision-exp")
+    monkeypatch.setattr(cfg, "fallback_base_url", "https://api.deepseek.com/v1")
+    monkeypatch.setattr(cfg, "fallback_api_key", "fallback-key")
+    update_settings(
+        db,
+        {
+            "tools_enabled": True,
+            "tools_allowed": "get_current_time",
+            "tool_max_calls": 1,
+            "tool_timeout_seconds": 5,
+        },
+    )
+    user_settings, conversation, row = _message_context(db)
+    sensenova = AsyncMock()
+    sensenova.complete.side_effect = [
+        CompletionResult(content="", tool_calls=[ToolCall(id="c1", name="get_current_time", arguments="{}")]),
+        # SenseNova 执行工具后仍要调用 → 触顶
+        CompletionResult(content="", tool_calls=[ToolCall(id="c2", name="get_current_time", arguments="{}")]),
+    ]
+    deepseek = AsyncMock()
+    deepseek.complete.return_value = CompletionResult(
+        content="DeepSeek 直接回答", prompt_tokens=5, completion_tokens=3
+    )
+    calls = []
+
+    def fake_provider(name, base_url, api_key, timeout):
+        calls.append((base_url, api_key))
+        return sensenova if "sensenova" in (base_url or "") else deepseek
+
+    monkeypatch.setattr("wecom_ai_gateway.services.resolve_provider",
+                        Mock(return_value=("openai-compatible", "https://sensenova.example/v1", "sen-key")))
+    monkeypatch.setattr("wecom_ai_gateway.services.provider_for", fake_provider)
+    monkeypatch.setattr("wecom_ai_gateway.services.execute_tool",
+                        AsyncMock(return_value={"ok": True, "timezone": "Asia/Shanghai"}))
+
+    answer = await _complete_ai(db, row, conversation, user_settings)
+
+    assert answer == "DeepSeek 直接回答"
+    # 调了 SenseNova 两次（触顶）+ DeepSeek 一次
+    assert len(calls) == 3
+    assert calls[0][1] == "sen-key"
+    assert calls[-1][1] == "fallback-key"
+    # 审计记录 fallback 事件
+    audit = db.query(AuditLog).filter(AuditLog.action == "model.fallback").all()
+    assert audit
+
+
+@respx.mock
+@pytest.mark.anyio
+async def test_web_search_uses_open_websearch_daemon_first():
+    """web_search 优先调用本地 open-websearch daemon（startpage 聚合结果）。"""
+    daemon_body = {
+        "status": "ok",
+        "data": {
+            "query": "广州东方同人展",
+            "engines": ["startpage"],
+            "totalResults": 2,
+            "results": [
+                {
+                    "title": "广州·东方同人only东方游剧天2026 - 漫展演出",
+                    "url": "https://show.bilibili.com/platform/detail.html?id=1000420",
+                    "description": "广东省广州市白云区西城智汇Park 路演中心。电子票，凭购票二维码验证入场。",
+                    "source": "show.bilibili.com",
+                    "engine": "startpage",
+                },
+                {
+                    "title": "活动| 叮铃铃·东方市场: 同人一站式服务平台",
+                    "url": "https://touhou.market/",
+                    "description": "东方·即卖会·3000 人。申摊·购票。近期活动。",
+                    "source": "touhou.market",
+                    "engine": "startpage",
+                },
+            ],
+            "partialFailures": [],
+        },
+        "error": None,
+        "hint": None,
+    }
+    route = respx.post("http://127.0.0.1:3210/search").mock(
+        return_value=httpx.Response(200, json=daemon_body)
+    )
+
+    result = await execute_tool("web_search", {"query": "广州东方同人展"}, timeout=10)
+
+    assert result["ok"] is True
+    assert result["source"] == "open-websearch"
+    assert len(result["results"]) == 2
+    first = result["results"][0]
+    assert first["title"] == "广州·东方同人only东方游剧天2026 - 漫展演出"
+    assert first["url"].startswith("https://")
+    assert "白云区" in first["snippet"]
+    # 请求体应包含 startpage 引擎
+    sent = route.calls.last.request.content.decode()
+    assert "startpage" in sent
+
+
+@respx.mock
+@pytest.mark.anyio
+async def test_web_search_falls_back_to_bing_when_daemon_unavailable():
+    """daemon 不可用时回退直连必应。"""
+    respx.post("http://127.0.0.1:3210/search").mock(
+        return_value=httpx.Response(503, text="daemon down")
+    )
+    respx.get("https://www.bing.com/search").mock(
+        return_value=httpx.Response(200, text="<li class=\"b_algo\"><h2><a href=\"https://example.com/x\">直连结果</a></h2><p>必应回退内容</p></li>")
+    )
+
+    result = await execute_tool("web_search", {"query": "回退测试"}, timeout=10)
+
+    assert result["ok"] is True
+    assert result["source"] == "Bing"
+    assert result["results"][0]["title"] == "直连结果"
+
+
+@respx.mock
+@pytest.mark.anyio
+async def test_web_search_daemon_empty_results_falls_back():
+    """daemon 返回空结果时也回退直连。"""
+    respx.post("http://127.0.0.1:3210/search").mock(
+        return_value=httpx.Response(200, json={"status": "ok", "data": {"results": []}})
+    )
+    respx.get("https://www.bing.com/search").mock(
+        return_value=httpx.Response(200, text="<li class=\"b_algo\"><h2><a href=\"https://example.com/b\">B 结果</a></h2><p>内容</p></li>")
+    )
+
+    result = await execute_tool("web_search", {"query": "空结果回退"}, timeout=10)
+
+    assert result["source"] == "Bing"
+    assert result["results"][0]["title"] == "B 结果"

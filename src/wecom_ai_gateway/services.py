@@ -934,9 +934,109 @@ async def _complete_ai(db, row: Message, conversation: Conversation, user_settin
         if tools is None:
             raise RuntimeError("模型返回了工具调用，但平台未启用工具执行")
         if tool_call_count + len(calls) > max_tool_calls:
-            # 工具调用次数已达上限：这不是可恢复的临时故障，重试只会重演同样的
-            # 工具调用循环。改为强制收尾——让模型基于已获得的搜索结果直接作答，
-            # 不再允许调用工具。这样用户能得到基于搜索的回答，而不是死循环重试。
+            # 工具调用次数已达上限。若当前还在主线路（SenseNova）且备用线路可用，
+            # 视为"主线路行为异常"：切到 DeepSeek 重新处理整条消息，DeepSeek 可能
+            # 一次就给出答案，而不是在同一模型上反复收尾。已在使用备用线路时才收尾。
+            if fallback_configured and not fallback_hit:
+                log.warning(
+                    "主线路工具调用异常触顶，切换到备用供应商重试 primary=%s fallback=%s",
+                    active_model,
+                    settings.fallback_model,
+                )
+                active_provider = "openai-compatible"
+                active_base_url = settings.fallback_base_url
+                active_api_key = settings.fallback_api_key
+                active_model = settings.fallback_model
+                record_provider = "openai-compatible(fallback)"
+                fallback_hit = True
+                result = await provider_for(
+                    active_provider,
+                    active_base_url,
+                    active_api_key,
+                    timeout=timeout,
+                ).complete(prompts, active_model, temperature, max_tokens, tools=tools)
+                db.add(
+                    UsageRecord(
+                        user_id=row.user_id,
+                        provider=record_provider,
+                        model=active_model,
+                        prompt_tokens=result.prompt_tokens,
+                        completion_tokens=result.completion_tokens,
+                    )
+                )
+                db.add(
+                    AuditLog(
+                        user_id=row.user_id,
+                        action="model.fallback",
+                        detail={
+                            "primary_model": model,
+                            "fallback_model": settings.fallback_model,
+                            "provider": record_provider,
+                        },
+                    )
+                )
+                db.commit()
+                calls = result.tool_calls or []
+                if not calls:
+                    if not result.content.strip():
+                        raise RuntimeError("模型尚未生成可发送的最终内容")
+                    return result.content
+                # DeepSeek 也要继续调用工具：执行这些调用（仍受总上限约束）
+                prompts.append(
+                    {
+                        "role": "assistant",
+                        "content": result.content or None,
+                        "tool_calls": [
+                            {
+                                "id": call.id,
+                                "type": "function",
+                                "function": {"name": call.name, "arguments": call.arguments},
+                            }
+                            for call in calls
+                        ],
+                    }
+                )
+                for call in calls:
+                    tool_call_count += 1
+                    started = perf_counter()
+                    ok = False
+                    error_type = None
+                    try:
+                        if len(call.arguments) > 4000:
+                            raise ToolValidationError("工具参数过长")
+                        arguments = json.loads(call.arguments)
+                        allowed_names = {item["function"]["name"] for item in tools}
+                        if call.name not in allowed_names:
+                            raise ToolValidationError("工具不在当前白名单")
+                        tool_result = await execute_tool(call.name, arguments, timeout=tool_timeout)
+                        ok = True
+                    except Exception as exc:  # noqa: BLE001 - 工具边界统一脱敏并审计，不能泄露第三方错误
+                        error_type = type(exc).__name__
+                        tool_result = {"ok": False, "error": "工具执行失败或参数无效"}
+                    latency_ms = round((perf_counter() - started) * 1000)
+                    db.add(
+                        AuditLog(
+                            user_id=row.user_id,
+                            action="tool.execute",
+                            detail={
+                                "tool": call.name[:80],
+                                "ok": ok,
+                                "latency_ms": latency_ms,
+                                "error_type": error_type,
+                            },
+                        )
+                    )
+                    db.commit()
+                    prompts.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": call.id,
+                            "name": call.name,
+                            "content": json.dumps(tool_result, ensure_ascii=False)[:8000],
+                        }
+                    )
+                continue
+            # 已在备用线路或未配置备用：强制收尾——让模型基于已获得的搜索结果直接作答
             prompts.append(
                 {
                     "role": "user",
@@ -1405,19 +1505,35 @@ def _split_reply(text: str, limit: int) -> list[str]:
     return [c for c in chunks if c]
 
 
+def _is_sensenova_usage(provider: str | None, model: str | None) -> bool:
+    """判断一条用量记录是否来自 SenseNova（不计入每日配额）。
+
+    SenseNova 是基本无限使用的免费额度；配额只应统计按量计费的备用线路
+    （如 DeepSeek）。模型名以 sensenova 开头或供应商名含 Sensenova 均视为不计入。
+    """
+    provider = provider or ""
+    model = model or ""
+    return model.startswith("sensenova") or "sensenova" in provider.lower()
+
+
 def quota_status(db, user_id: str, user_settings) -> dict:
-    """返回用户当日配额状态；配额开关关闭时永不超限。"""
+    """返回用户当日配额状态；配额开关关闭时永不超限。
+
+    SenseNova 用量不计入配额（免费且基本无限），只有按量计费线路（DeepSeek）计入。
+    """
     if not bool(get_runtime_value(db, "daily_quota_enabled")):
         return {"enabled": False, "quota": 0, "used": 0, "remaining": 0, "exceeded": False}
     start = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
-    used = int(
-        db.scalar(
-            select(func.coalesce(func.sum(UsageRecord.prompt_tokens + UsageRecord.completion_tokens), 0)).where(
-                UsageRecord.user_id == user_id, UsageRecord.created_at >= start
-            )
+    rows = db.scalars(
+        select(UsageRecord).where(
+            UsageRecord.user_id == user_id, UsageRecord.created_at >= start
         )
-        or 0
-    )
+    ).all()
+    used = 0
+    for record in rows:
+        if _is_sensenova_usage(record.provider, record.model):
+            continue
+        used += int(record.prompt_tokens or 0) + int(record.completion_tokens or 0)
     quota = int(
         (user_settings.daily_token_quota if user_settings and user_settings.daily_token_quota else None)
         or get_effective_value(db, "user_daily_token_quota", user_id=user_id)
