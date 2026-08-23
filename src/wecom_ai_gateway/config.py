@@ -26,6 +26,12 @@ class Settings(BaseSettings):
     default_system_prompt: str = "你是一个准确、友善且尊重隐私的人工智能助手。"
     openai_compatible_base_url: str = "https://api.deepseek.com/v1"
     openai_compatible_api_key: str = ""
+    # 平台默认线路的备用供应商（可选）：主供应商超时/5xx/429/空回复时自动切换，
+    # 保证一个服务不可用时另一个能接上。留空即不启用回退（保持原单供应商行为）。
+    # 仅对平台默认线路生效；用户 BYOK 自带密钥不参与回退，避免静默消耗平台额度。
+    fallback_model: str = ""
+    fallback_base_url: str = ""
+    fallback_api_key: str = ""
     # 模型推理可能包含较长的思考阶段。默认 300 秒避免把正常长响应误判为失败；
     # Worker 会持续续租任务，避免该等待期间被其他 Worker 重复领取。
     request_timeout_seconds: int = 300

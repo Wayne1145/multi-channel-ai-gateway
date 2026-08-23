@@ -35,6 +35,7 @@ from .redaction import redact_error
 from .runtime_settings import get_effective_value, get_runtime_value
 from .security import decrypt_secret, encrypt_secret, external_id_hash
 from .tasks import add_message_task
+from .model_routing import _is_failover_error
 from .tool_execution import (
     ToolValidationError,
     execute_tool,
@@ -721,6 +722,19 @@ async def _complete_ai(db, row: Message, conversation: Conversation, user_settin
     max_tool_calls = int(get_runtime_value(db, "tool_max_calls"))
     tool_timeout = float(get_runtime_value(db, "tool_timeout_seconds"))
     tool_call_count = 0
+    # 平台默认线路的备用供应商：主线路超时/5xx/429/空回复时自动切换，保证
+    # 一个服务不可用时另一个能接上。BYOK 用户不参与（自带密钥，禁止静默消耗平台额度）。
+    fallback_configured = bool(
+        not is_byok
+        and settings.fallback_base_url
+        and settings.fallback_api_key
+        and settings.fallback_model
+    )
+    active_provider = provider_name
+    active_base_url = base_url
+    active_api_key = api_key
+    active_model = model
+    record_provider = provider_name
     while True:
         if use_model_group:
             from .model_routing import complete_with_routing
@@ -738,14 +752,37 @@ async def _complete_ai(db, row: Message, conversation: Conversation, user_settin
             actual_provider = result.provider_name
             actual_model = result.model
         else:
-            result = await provider_for(
-                provider_name,
-                base_url,
-                api_key,
-                timeout=timeout,
-            ).complete(prompts, model, temperature, max_tokens, tools=tools)
-            actual_provider = provider_name
-            actual_model = model
+            try:
+                result = await provider_for(
+                    active_provider,
+                    active_base_url,
+                    active_api_key,
+                    timeout=timeout,
+                ).complete(prompts, active_model, temperature, max_tokens, tools=tools)
+            except Exception as exc:
+                # 只有临时上游故障才切换；鉴权/请求参数/本地配置错误必须直接暴露。
+                if not (fallback_configured and _is_failover_error(exc)):
+                    raise
+                log.warning(
+                    "主线路失败，切换到备用供应商 primary=%s fallback_model=%s error=%s",
+                    active_model,
+                    settings.fallback_model,
+                    redact_error(exc, 300),
+                )
+                active_provider = "openai-compatible"
+                active_base_url = settings.fallback_base_url
+                active_api_key = settings.fallback_api_key
+                active_model = settings.fallback_model
+                record_provider = "openai-compatible(fallback)"
+                # 切换后整条消息（含后续工具轮次）都走备用线路，避免线路来回跳
+                result = await provider_for(
+                    active_provider,
+                    active_base_url,
+                    active_api_key,
+                    timeout=timeout,
+                ).complete(prompts, active_model, temperature, max_tokens, tools=tools)
+            actual_provider = record_provider
+            actual_model = active_model
         db.add(
             UsageRecord(
                 user_id=row.user_id,
@@ -755,6 +792,19 @@ async def _complete_ai(db, row: Message, conversation: Conversation, user_settin
                 completion_tokens=result.completion_tokens,
             )
         )
+        # 备用线路命中时记录审计，便于管理员观察回退是否过于频繁
+        if record_provider.endswith("(fallback)"):
+            db.add(
+                AuditLog(
+                    user_id=row.user_id,
+                    action="model.fallback",
+                    detail={
+                        "primary_model": model,
+                        "fallback_model": settings.fallback_model,
+                        "provider": record_provider,
+                    },
+                )
+            )
         # 上游已经产生计费用量；即使后续工具校验或调用上限失败，也必须保留真实消耗。
         db.commit()
         calls = result.tool_calls or []
