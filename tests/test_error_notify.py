@@ -8,15 +8,16 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from wecom_ai_gateway.config import settings
+from wecom_ai_gateway.db import SessionLocal
 from wecom_ai_gateway.models import (
     ChannelIdentity,
     Conversation,
     Message,
-    MessageDirection,
     MessageStatus,
     OutboxStatus,
     OutboxTask,
     User,
+    UserSettings,
 )
 from wecom_ai_gateway.security import encrypt_secret
 from wecom_ai_gateway.tasks import add_message_task, claim_task, fail_task
@@ -159,7 +160,6 @@ async def test_notify_model_error_sends_text_with_detail(db, monkeypatch):
 
     send_text = AsyncMock(return_value="err-msg-1")
     monkeypatch.setattr(svc.client, "send_text", send_text)
-    from wecom_ai_gateway.runtime_settings import get_runtime_value
 
     result = await svc.notify_model_error(db, row.id)
     assert result is True
@@ -217,3 +217,92 @@ async def test_notify_model_error_hides_detail_when_disabled(db, monkeypatch):
     assert "请联系管理员" in text
     assert "模型服务不可用" not in text
     assert "503" not in text
+
+@pytest.mark.anyio
+async def test_error_notice_not_injected_into_conversation_history(db, monkeypatch):
+    """error_notice 系统通知不得进入模型 history，避免模型复述 [error] 文案。
+
+    回归：死信通知（error_notice=True）被当作 assistant 消息喂给模型后，
+    SenseNova 误以为"上一条回复"是 [error] 文案并原样复述，用户收到
+    "[error] 后端服务出现错误，请联系管理员。" 作为正常回复。
+    """
+    from wecom_ai_gateway import services as svc
+
+    user = User()
+    db.add(user)
+    db.flush()
+    us = UserSettings(user_id=user.id)
+    db.add(us)
+    conversation = Conversation(user_id=user.id)
+    db.add(conversation)
+    db.flush()
+    # 正常用户消息
+    row = Message(
+        user_id=user.id,
+        conversation_id=conversation.id,
+        channel="wecom_kf",
+        external_message_id="hist-msg-1",
+        direction="inbound",
+        message_type="text",
+        content="再搜一次",
+        status=MessageStatus.processing,
+    )
+    # 之前的死信通知（error_notice）
+    notice = Message(
+        conversation_id=conversation.id,
+        user_id=user.id,
+        channel="wecom_kf",
+        external_message_id="hist-notice-1",
+        direction="outbound",
+        message_type="text",
+        content="[error] 后端服务出现错误，请联系管理员。",
+        status=MessageStatus.sent,
+        metadata_json={"error_notice": True},
+    )
+    # 之前的正常回复
+    normal = Message(
+        conversation_id=conversation.id,
+        user_id=user.id,
+        channel="wecom_kf",
+        external_message_id="hist-normal-1",
+        direction="outbound",
+        message_type="text",
+        content="之前搜到的结果",
+        status=MessageStatus.sent,
+    )
+    db.add_all([row, notice, normal])
+    db.commit()
+    row_id = row.id
+    db.close()
+
+    captured = []
+
+    async def fake_complete_with_routing(db_arg, us_arg, prompts, **kw):
+        captured.extend(prompts)
+        from wecom_ai_gateway.model_routing import RoutedCompletion
+
+        return RoutedCompletion(
+            content="ok", provider_name="fake", provider_key="fake",
+            model="fake", prompt_tokens=1, completion_tokens=1, tool_calls=[],
+        )
+
+    mr_module = __import__("sys").modules["wecom_ai_gateway.model_routing"]
+    monkeypatch.setattr(mr_module, "complete_with_routing", fake_complete_with_routing)
+    monkeypatch.setattr(
+        mr_module,
+        "active_routes",
+        lambda db_arg, gid=None: [{"provider_id": "p1", "model": "m1", "priority": 10, "enabled": True}],
+    )
+
+    db = SessionLocal()
+    row = db.get(Message, row_id)
+    conv = db.get(Conversation, row.conversation_id)
+    us = db.get(UserSettings, row.user_id)
+    await svc._complete_ai(db, row, conv, us)
+    db.close()
+
+    history_text = "\n".join(
+        str(p.get("content") or "") for p in captured if p.get("role") != "system"
+    )
+    assert "之前搜到的结果" in history_text, "正常回复应保留在历史中"
+    assert "[error]" not in history_text, "error_notice 通知不得注入历史"

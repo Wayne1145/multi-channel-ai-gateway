@@ -736,6 +736,13 @@ async def _complete_ai(db, row: Message, conversation: Conversation, user_settin
             .limit(user_settings.context_messages or 20)
         )
     )[::-1]
+    # 排除 error_notice 系统通知：它们是死信告警，不是对话内容；混入 history 会让
+    # 模型误以为"上一条回复"是 [error] 文案并复述它（生产已实际触发该问题）。
+    history = [
+        message
+        for message in history
+        if not (message.metadata_json or {}).get("error_notice")
+    ]
     memories = []
     if user_settings.memory_enabled:
         memories = list(
