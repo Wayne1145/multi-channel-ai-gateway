@@ -1,9 +1,7 @@
 """0014 新增用户设置字段 command_guidance_enabled 与渠道身份绑定状态。"""
 
-from alembic import op
 import sqlalchemy as sa
-from sqlalchemy.dialects.postgresql import JSONB
-
+from alembic import op
 
 revision = "0014"
 down_revision = "0013"

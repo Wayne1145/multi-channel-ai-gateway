@@ -1,13 +1,15 @@
 """0014 迁移 + 命令指引开关 + /qr clawbot 动态人设化 的回归测试。"""
+
 import sys
 from unittest.mock import patch
 
 import pytest
+from fastapi.testclient import TestClient
 
-from wecom_ai_gateway.channels import registry
 from wecom_ai_gateway.clawbot import ClawBotAdapter
 from wecom_ai_gateway.config import settings
 from wecom_ai_gateway.db import SessionLocal
+from wecom_ai_gateway.main import app
 from wecom_ai_gateway.models import (
     Account,
     ChannelIdentity,
@@ -20,9 +22,6 @@ from wecom_ai_gateway.models import (
     UserSettings,
 )
 from wecom_ai_gateway.security import encrypt_secret
-from fastapi.testclient import TestClient
-
-from wecom_ai_gateway.main import app
 
 client = TestClient(app)
 

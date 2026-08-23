@@ -467,6 +467,21 @@ async def test_web_search_daemon_unavailable_returns_friendly_note():
 
 @respx.mock
 @pytest.mark.anyio
+async def test_web_search_failure_log_does_not_leak_query(caplog):
+    """搜索服务异常日志不得记录用户查询正文。"""
+    private_query = "我的私人病历编号 123456"
+    respx.post("http://open-websearch:3210/search").mock(
+        return_value=httpx.Response(503, text="daemon down")
+    )
+
+    await execute_tool("web_search", {"query": private_query}, timeout=10)
+
+    assert private_query not in caplog.text
+    assert "candidate_index=1" in caplog.text
+
+
+@respx.mock
+@pytest.mark.anyio
 async def test_web_search_rejects_bad_arguments_and_handles_no_results():
     """参数校验：空查询/超长/多余参数都拒绝；无结果时返回空列表不报错。"""
     with pytest.raises(ToolValidationError, match="关键词"):
@@ -578,6 +593,64 @@ async def test_tool_limit_on_primary_fails_over_to_fallback_model(db, monkeypatc
     # 审计记录 fallback 事件
     audit = db.query(AuditLog).filter(AuditLog.action == "model.fallback").all()
     assert audit
+
+
+@pytest.mark.anyio
+async def test_fallback_model_cannot_execute_tools_past_total_limit(db, monkeypatch):
+    """主线路触顶后，备用线路仍请求工具时不得突破整条消息的总调用上限。"""
+    from wecom_ai_gateway.config import settings as cfg
+
+    monkeypatch.setattr(cfg, "fallback_model", "deepseek-v4-flash-vision-exp")
+    monkeypatch.setattr(cfg, "fallback_base_url", "https://api.deepseek.com/v1")
+    monkeypatch.setattr(cfg, "fallback_api_key", "fallback-key")
+    update_settings(
+        db,
+        {
+            "tools_enabled": True,
+            "tools_allowed": "get_current_time",
+            "tool_max_calls": 1,
+            "tool_timeout_seconds": 5,
+        },
+    )
+    user_settings, conversation, row = _message_context(db)
+    sensenova = AsyncMock()
+    sensenova.complete.side_effect = [
+        CompletionResult(
+            content="",
+            tool_calls=[ToolCall(id="primary-1", name="get_current_time", arguments="{}")],
+        ),
+        CompletionResult(
+            content="",
+            tool_calls=[ToolCall(id="primary-2", name="get_current_time", arguments="{}")],
+        ),
+    ]
+    deepseek = AsyncMock()
+    deepseek.complete.side_effect = [
+        CompletionResult(
+            content="",
+            tool_calls=[ToolCall(id="fallback-1", name="get_current_time", arguments="{}")],
+        ),
+        CompletionResult(content="根据已有结果直接回答", prompt_tokens=2, completion_tokens=1),
+    ]
+
+    def fake_provider(name, base_url, api_key, timeout):
+        return sensenova if "sensenova" in (base_url or "") else deepseek
+
+    tool_runner = AsyncMock(return_value={"ok": True, "timezone": "Asia/Shanghai"})
+    monkeypatch.setattr(
+        "wecom_ai_gateway.services.resolve_provider",
+        Mock(return_value=("openai-compatible", "https://sensenova.example/v1", "sen-key")),
+    )
+    monkeypatch.setattr("wecom_ai_gateway.services.provider_for", fake_provider)
+    monkeypatch.setattr("wecom_ai_gateway.services.execute_tool", tool_runner)
+
+    answer = await _complete_ai(db, row, conversation, user_settings)
+
+    assert answer == "根据已有结果直接回答"
+    assert tool_runner.await_count == 1, "备用线路不得突破整条消息的工具调用总上限"
+    assert deepseek.complete.await_count == 2
+    assert deepseek.complete.await_args_list[-1].kwargs.get("tools") is None
+    assert db.query(AuditLog).filter(AuditLog.action == "model.fallback").count() == 1
 
 
 @respx.mock

@@ -17,7 +17,6 @@ from wecom_ai_gateway.config import settings
 from wecom_ai_gateway.models import (
     Conversation,
     Message,
-    MessageDirection,
     MessageStatus,
     UsageRecord,
     User,
@@ -26,7 +25,6 @@ from wecom_ai_gateway.models import (
 )
 from wecom_ai_gateway.providers import CompletionResult, RetryableProviderError
 from wecom_ai_gateway.security import encrypt_secret
-from wecom_ai_gateway.services import _complete_ai
 
 
 def _setup_conversation(db, *, byok: bool = False, api_key: str = "platform-key"):
@@ -98,7 +96,6 @@ async def test_primary_timeout_fails_over_to_fallback(db, monkeypatch):
     assert calls[0][1] == "primary-key"
     assert calls[1][1] == "fallback-key"
     # 用量记录写实际命中供应商
-    db = db
     usage = db.query(UsageRecord).all()
     assert usage
     assert "fallback" in usage[0].provider

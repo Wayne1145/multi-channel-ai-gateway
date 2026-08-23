@@ -318,7 +318,7 @@ async def _open_websearch(arguments: dict[str, Any], timeout: float) -> dict | N
         candidate_queries.append(sanitized)
     candidate_queries.append(query)
 
-    for candidate in candidate_queries:
+    for candidate_index, candidate in enumerate(candidate_queries, start=1):
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
                 response = await client.post(
@@ -351,8 +351,9 @@ async def _open_websearch(arguments: dict[str, Any], timeout: float) -> dict | N
             return {"ok": True, "query": query, "results": normalized, "source": "open-websearch"}
         except Exception:
             log_tool.warning(
-                "open-websearch daemon 搜索失败，回退直连 query=%s candidate=%s",
-                query, candidate, exc_info=True,
+                "open-websearch daemon 搜索失败 candidate_index=%s",
+                candidate_index,
+                exc_info=True,
             )
             break
     return None

@@ -851,6 +851,9 @@ async def _complete_ai(db, row: Message, conversation: Conversation, user_settin
     active_api_key = api_key
     active_model = model
     record_provider = provider_name
+    # 持久状态：当前整条消息是否已经在备用线路。不能复用 fallback_hit；后者只控制
+    # 一次性审计写入，并会在落库后清零。
+    using_fallback = vision_forced
     fallback_hit = False
     if vision_forced:
         # 图片必须走多模态：直接锁定备用线路，不经过 SenseNova 模型组。
@@ -898,6 +901,7 @@ async def _complete_ai(db, row: Message, conversation: Conversation, user_settin
                 active_api_key = settings.fallback_api_key
                 active_model = settings.fallback_model
                 record_provider = "openai-compatible(fallback)"
+                using_fallback = True
                 fallback_hit = True
                 # 切换后整条消息（含后续工具轮次）都走备用线路，避免线路来回跳
                 result = await provider_for(
@@ -944,7 +948,7 @@ async def _complete_ai(db, row: Message, conversation: Conversation, user_settin
             # 工具调用次数已达上限。若当前还在主线路（SenseNova）且备用线路可用，
             # 视为"主线路行为异常"：切到 DeepSeek 重新处理整条消息，DeepSeek 可能
             # 一次就给出答案，而不是在同一模型上反复收尾。已在使用备用线路时才收尾。
-            if fallback_configured and not fallback_hit:
+            if fallback_configured and not using_fallback:
                 log.warning(
                     "主线路工具调用异常触顶，切换到备用供应商重试 primary=%s fallback=%s",
                     active_model,
@@ -955,6 +959,7 @@ async def _complete_ai(db, row: Message, conversation: Conversation, user_settin
                 active_api_key = settings.fallback_api_key
                 active_model = settings.fallback_model
                 record_provider = "openai-compatible(fallback)"
+                using_fallback = True
                 fallback_hit = True
                 result = await provider_for(
                     active_provider,
@@ -988,6 +993,39 @@ async def _complete_ai(db, row: Message, conversation: Conversation, user_settin
                     if not result.content.strip():
                         raise RuntimeError("模型尚未生成可发送的最终内容")
                     return result.content
+                if tool_call_count + len(calls) > max_tool_calls:
+                    prompts.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                "工具调用次数已达上限，请不要再调用任何工具，"
+                                "直接根据上面已经获得的搜索结果或已有信息，"
+                                "用一段话回答用户的问题。"
+                            ),
+                        }
+                    )
+                    final_result = await provider_for(
+                        active_provider,
+                        active_base_url,
+                        active_api_key,
+                        timeout=timeout,
+                    ).complete(prompts, active_model, temperature, max_tokens, tools=None)
+                    db.add(
+                        UsageRecord(
+                            user_id=row.user_id,
+                            provider=record_provider,
+                            model=active_model,
+                            prompt_tokens=final_result.prompt_tokens,
+                            completion_tokens=final_result.completion_tokens,
+                        )
+                    )
+                    db.commit()
+                    if final_result.content.strip():
+                        return final_result.content
+                    return (
+                        "我试着搜索了一下相关信息，但暂时还没整理出满意的答案。"
+                        "你可以换一种问法，或者晚点再问我一次。"
+                    )
                 # DeepSeek 也要继续调用工具：执行这些调用（仍受总上限约束）
                 prompts.append(
                     {
