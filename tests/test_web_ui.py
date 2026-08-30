@@ -113,3 +113,15 @@ def test_restricted_tool_settings_group_is_wired():
     assert '"/api/auth/mfa/disable"' in js
     assert "recovery_codes" in js
     assert '"tool"' in js
+
+
+def test_mobile_portrait_layout_keeps_navigation_and_topbar_visible():
+    html = (ROOT / "web/index.html").read_text(encoding="utf-8")
+    css = (ROOT / "web/static/app.css").read_text(encoding="utf-8")
+
+    assert "/static/app.css?v=5" in html
+    assert "@media (max-width: 600px)" in css
+    assert "position: sticky" in css
+    assert "grid-template-columns: minmax(0, 1fr) auto" in css
+    assert "scrollbar-width: none" in css
+    assert "padding: 14px 12px 48px" in css

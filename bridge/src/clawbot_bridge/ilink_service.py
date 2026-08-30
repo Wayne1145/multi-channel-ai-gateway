@@ -1,10 +1,15 @@
 """将 iLink HTTP 客户端适配为可停止、可续传的长轮询服务。"""
 
 import asyncio
+import logging
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 
+import httpx
+
 from .ilink import ILinkClient, ILinkCredentials, ParsedInboundText
+
+log = logging.getLogger(__name__)
 
 
 class ILinkService:
@@ -13,9 +18,13 @@ class ILinkService:
         *,
         state_dir: Path,
         client_factory: Callable[[ILinkCredentials], ILinkClient] = ILinkClient,
+        reconnect_delays: tuple[float, ...] = (1, 2, 5, 10, 30),
     ) -> None:
         self._state_dir = state_dir
         self._client_factory = client_factory
+        if not reconnect_delays or any(delay < 0 for delay in reconnect_delays):
+            raise ValueError("重连等待序列必须包含非负数")
+        self._reconnect_delays = reconnect_delays
 
     def _cursor_path(self, instance_id: str) -> Path:
         safe_instance_id = instance_id.replace("/", "_").replace("..", "_")
@@ -43,8 +52,27 @@ class ILinkService:
     ) -> None:
         client = self._client_factory(credentials)
         cursor = self._load_cursor(instance_id)
+        consecutive_failures = 0
         while not stop_event.is_set():
-            next_cursor, messages = await client.get_updates(cursor)
+            try:
+                next_cursor, messages = await client.get_updates(cursor)
+            except (OSError, httpx.TransportError) as exc:
+                delay = self._reconnect_delays[
+                    min(consecutive_failures, len(self._reconnect_delays) - 1)
+                ]
+                consecutive_failures += 1
+                log.warning(
+                    "iLink transient connection failure instance=%s error=%s retry_in=%ss",
+                    instance_id,
+                    type(exc).__name__,
+                    delay,
+                )
+                try:
+                    await asyncio.wait_for(stop_event.wait(), timeout=delay)
+                except TimeoutError:
+                    continue
+                break
+            consecutive_failures = 0
             for message in messages:
                 await on_message(message)
             # 只有整批消息都被网关接受后，才提交 iLink 游标。

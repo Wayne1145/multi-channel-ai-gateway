@@ -414,6 +414,86 @@ select.field { cursor: pointer; }
   .topbar { flex-direction: column; align-items: flex-start; }
 }
 
+/* 手机竖屏：导航独占一行，顶栏恢复为紧凑双列，避免品牌/退出按钮挤掉页面标题。 */
+@media (max-width: 600px) {
+  .sidebar {
+    position: sticky;
+    top: 0;
+    z-index: 30;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 9px 10px;
+    padding: max(10px, env(safe-area-inset-top)) 12px 9px;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+  .brand {
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    padding: 0;
+  }
+  .brand small { display: none; }
+  .sidebar-foot {
+    grid-column: 2;
+    grid-row: 1;
+    padding: 7px 12px;
+  }
+  .nav {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    width: 100%;
+    gap: 4px;
+    overflow-x: auto;
+    scrollbar-width: none;
+    overscroll-behavior-x: contain;
+    -webkit-overflow-scrolling: touch;
+  }
+  .nav::-webkit-scrollbar { display: none; }
+  .nav-item {
+    min-height: 38px;
+    padding: 9px 11px;
+    flex: 0 0 auto;
+  }
+  .content {
+    width: 100%;
+    min-width: 0;
+    padding: 14px 12px 48px;
+  }
+  .topbar {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 14px;
+  }
+  .topbar h1 {
+    min-width: 0;
+    font-size: 20px;
+    overflow-wrap: anywhere;
+  }
+  .topbar-actions { gap: 7px; }
+  #last-updated { display: none; }
+  .stat-grid { gap: 10px; }
+  .stat-card { padding: 15px 14px; }
+  .stat-card b { font-size: 24px; }
+  .stat-card .stat-ico { display: none; }
+  .card { padding: 15px 13px; margin-bottom: 14px; }
+  .filters,
+  .settings-item,
+  .settings-control {
+    width: 100%;
+    min-width: 0;
+  }
+  .settings-item { flex-direction: column; gap: 8px; }
+  .settings-control { max-width: none; }
+  .settings-input { width: 100%; }
+  .modal-mask { padding: 10px; }
+  .modal { padding: 17px 14px; max-height: 92vh; }
+  .detail-grid { grid-template-columns: 1fr 1fr; }
+  .text-clip { max-width: 220px; }
+}
+
 /* ---------- 减少动态偏好 ---------- */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {

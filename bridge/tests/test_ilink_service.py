@@ -102,3 +102,40 @@ async def test_ilink_service_delegates_send_text(tmp_path: Path) -> None:
 
     assert message_id == "outbound-1"
     assert fake.sent == [("user@im.wechat", "context-1", "回复")]
+
+
+@pytest.mark.anyio
+async def test_ilink_service_retries_transient_connection_failure(tmp_path: Path) -> None:
+    stop_event = asyncio.Event()
+
+    class FlakyClient(FakeClient):
+        async def get_updates(self, cursor: str):
+            self.calls.append(cursor)
+            if len(self.calls) == 1:
+                raise OSError("temporary connection reset")
+            stop_event.set()
+            return "cursor-after-reconnect", []
+
+    fake = FlakyClient()
+    service = ILinkService(
+        state_dir=tmp_path,
+        client_factory=lambda credentials: fake,
+        reconnect_delays=(0,),
+    )
+    async def stop_after_reconnect(message: ParsedInboundText) -> None:
+        raise AssertionError("本测试不应收到消息")
+
+    task = asyncio.create_task(
+        service.monitor(
+            "instance-reconnect",
+            ILinkCredentials("secret", "https://ilinkai.weixin.qq.com"),
+            stop_after_reconnect,
+            stop_event,
+        )
+    )
+    await asyncio.wait_for(task, timeout=1)
+
+    assert fake.calls[:2] == ["", ""]
+    assert (tmp_path / "instance-reconnect" / "get_updates_buf").read_text() == (
+        "cursor-after-reconnect"
+    )
