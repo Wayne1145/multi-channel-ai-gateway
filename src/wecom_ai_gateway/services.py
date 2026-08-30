@@ -354,9 +354,22 @@ async def process_message(message_id: str) -> None:
     try:
         user_settings = db.get(UserSettings, row.user_id) or UserSettings(user_id=row.user_id)
         conversation = db.get(Conversation, row.conversation_id)
+        account_result = _handle_account_command(db, row)
+        if account_result is not None:
+            stored_content = (
+                "[账号激活链接已发送]" if "#activate=" in account_result else account_result
+            )
+            await _deliver_reply(
+                db,
+                conversation,
+                row,
+                account_result,
+                stored_content=stored_content,
+            )
+            return
         bind_result = _handle_bind_command(db, row)
         if bind_result is not None:
-            _deliver_reply(db, conversation, row, bind_result)
+            await _deliver_reply(db, conversation, row, bind_result)
             return
         # /qr clawbot：返回 None 表示未命中，否则返回 {text, media_bytes}
         qr_payload = await _handle_qr_clawbot_command(db, row)
@@ -1264,23 +1277,67 @@ def _restore_merged_messages(db: Session, main_row: Message) -> None:
     db.commit()
 
 
-def _deliver_reply(db: Session, conversation, row: Message, content: str) -> None:
-    """把命令/绑定类简单回复写库并提交，不关闭 db 由调用者决定。"""
+async def _deliver_reply(
+    db: Session,
+    conversation,
+    row: Message,
+    content: str,
+    *,
+    stored_content: str | None = None,
+) -> None:
+    """把特殊指令回复投递到原渠道，并保存脱敏后的出站记录。"""
+    metadata = dict(row.metadata_json or {})
+    if metadata.get("reply_dispatch") == "started":
+        raise RuntimeError("回复投递状态未知，已停止自动重发以避免重复消息")
+    metadata["reply_dispatch"] = "started"
+    row.metadata_json = metadata
+    db.commit()
+
+    account_id = (
+        metadata.get("open_kfid") or settings.wecom_open_kfid
+        if row.channel == "wecom_kf"
+        else metadata.get("instance_id")
+    )
+    identity = db.scalar(
+        select(ChannelIdentity).where(
+            ChannelIdentity.user_id == row.user_id,
+            ChannelIdentity.channel == row.channel,
+            ChannelIdentity.account_id == account_id,
+        )
+    )
+    if identity is None:
+        raise RuntimeError("找不到与入站渠道实例匹配的用户身份")
+    external_id = decrypt_secret(identity.external_id_encrypted)
+    if row.channel == "wecom_kf":
+        sent_id = await client.send_text(account_id, external_id, content)
+    else:
+        sent_id = await registry.get(row.channel).send(
+            OutgoingMessage(
+                channel=row.channel,
+                instance_id=account_id,
+                to_sender_id=external_id,
+                text=content,
+                metadata={"reply_to": row.external_message_id},
+            )
+        )
     db.add(
         Message(
             conversation_id=conversation.id if conversation else None,
             user_id=row.user_id,
             channel=row.channel,
-            channel_instance_id=(row.metadata_json or {}).get("instance_id") or "",
-            external_message_id=f"local:{row.id}",
+            channel_instance_id=account_id or "",
+            external_message_id=sent_id or f"local:{row.id}",
             direction=MessageDirection.outbound,
             message_type="text",
-            content=content,
+            content=stored_content if stored_content is not None else content,
             status=MessageStatus.sent,
             metadata_json={"reply_to": row.external_message_id},
         )
     )
+    metadata["reply_dispatch"] = "sent"
+    row.metadata_json = metadata
     row.status = MessageStatus.sent
+    row.error = None
     db.commit()
     db.close()
 
@@ -1516,6 +1573,27 @@ def _handle_bind_command(db: Session, row: Message) -> str | None:
         )
         return result["message"]
     return "用法：/bind 获取绑定码；/bind <码> 完成绑定。"
+
+
+def _handle_account_command(db: Session, row: Message) -> str | None:
+    """处理微信用户后台账号激活指令；非该指令返回 None。"""
+    content = (row.content or "").strip()
+    if not content.startswith("/account"):
+        return None
+    if content != "/account":
+        return "用法：发送 /account 获取后台账号激活链接。"
+    from .account_activation import create_activation_token
+    from .models import Account
+
+    account = db.scalar(select(Account).where(Account.user_id == row.user_id))
+    base_url = settings.public_base_url.rstrip("/")
+    if account:
+        return f"你的后台账号是 {account.username}，请打开 {base_url}/ 登录。"
+    token = create_activation_token(db, row.user_id)
+    return (
+        f"请打开 {base_url}/#activate={token} 设置后台用户名和密码。"
+        "链接 15 分钟内有效，仅限一次，请勿转发。"
+    )
 
 
 def _split_reply(text: str, limit: int) -> list[str]:

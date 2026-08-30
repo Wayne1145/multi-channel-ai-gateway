@@ -54,6 +54,7 @@ HELP = """可用命令：
 /clear confirm 清除自己的聊天记录
 /memory on|off|list|add <内容>|delete <序号>|clear confirm 管理私有记忆
 /usage 查看今日用量
+/account 获取后台账号激活链接
 /bind 获取跨渠道绑定码（/bind <码> 完成绑定）
 /kb add|list|delete|search 管理个人知识库"""
 

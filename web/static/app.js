@@ -13,6 +13,16 @@
   let principal = JSON.parse(sessionStorage.getItem(AUTH_KEY) || "null");
   let registering = false;
   let mfaChallenge = "";
+  let activationToken = "";
+  if (location.hash.startsWith("#activate=")) {
+    try {
+      activationToken = decodeURIComponent(location.hash.slice("#activate=".length));
+    } catch (_) {
+      activationToken = "";
+    }
+    // 令牌位于 fragment，不会发送给服务器；读取后立即从地址栏和历史中移除。
+    history.replaceState(null, "", location.pathname + location.search);
+  }
 
   /* ---------- 基础请求 ---------- */
   async function api(path, opts = {}) {
@@ -85,12 +95,15 @@
     $("app").classList.add("hidden");
     $("login").classList.remove("hidden");
     $("password-input").value = "";
+    $("confirm-password-input").value = "";
     $("mfa-code-input").value = "";
     $("mfa-code-input").classList.add("hidden");
     $("mfa-cancel").classList.add("hidden");
     $("username-input").disabled = false;
     $("password-input").disabled = false;
     $("login-btn").textContent = "登录";
+    $("confirm-password-input").classList.add("hidden");
+    $("activation-hint").classList.add("hidden");
     $("login-error").classList.add("hidden");
   }
 
@@ -101,13 +114,25 @@
     const username = $("username-input").value.trim();
     const password = $("password-input").value;
     const mfaCode = $("mfa-code-input").value.trim();
+    const confirmPassword = $("confirm-password-input").value;
     if ((!username || !password) && !mfaChallenge) return;
+    if (activationToken && !confirmPassword) return;
     if (mfaChallenge && !mfaCode) return;
     btn.disabled = true;
     err.classList.add("hidden");
     try {
-      const path = mfaChallenge ? "/api/auth/mfa/verify" : registering ? "/api/auth/register" : "/api/auth/login";
-      const payload = mfaChallenge ? { challenge_token: mfaChallenge, code: mfaCode } : { username, password };
+      const path = mfaChallenge
+        ? "/api/auth/mfa/verify"
+        : activationToken
+          ? "/api/auth/activate"
+          : registering
+            ? "/api/auth/register"
+            : "/api/auth/login";
+      const payload = mfaChallenge
+        ? { challenge_token: mfaChallenge, code: mfaCode }
+        : activationToken
+          ? { activation_token: activationToken, username, password, confirm_password: confirmPassword }
+          : { username, password };
       if (registering) payload.display_name = $("display-name-input").value.trim() || undefined;
       const auth = await api(path, {
         method: "POST",
@@ -131,6 +156,7 @@
       sessionStorage.setItem(TOKEN_KEY, token);
       sessionStorage.setItem(AUTH_KEY, JSON.stringify(principal));
       mfaChallenge = "";
+      activationToken = "";
       enterApp();
     } catch (ex) {
       err.textContent = ex.message;
@@ -146,6 +172,14 @@
     $("login-btn").textContent = registering ? "创建并登录" : "登录";
     $("register-toggle").textContent = registering ? "返回登录" : "注册账户";
   });
+  if (activationToken) {
+    $("password-input").setAttribute("autocomplete", "new-password");
+    $("confirm-password-input").classList.remove("hidden");
+    $("activation-hint").classList.remove("hidden");
+    $("login-btn").textContent = "创建账号并登录";
+    $("register-toggle").classList.add("hidden");
+    document.querySelector(".login-sub").textContent = "微信用户 · 激活账户";
+  }
   $("mfa-cancel").addEventListener("click", () => {
     mfaChallenge = "";
     $("mfa-code-input").value = "";
@@ -1159,7 +1193,7 @@
   fetch("/api/auth/config")
     .then((res) => res.json())
     .then((cfg) => {
-      $("register-toggle").classList.toggle("hidden", !cfg.registration_enabled);
+      $("register-toggle").classList.toggle("hidden", Boolean(activationToken) || !cfg.registration_enabled);
       if (cfg.announcement) {
         const el = $("login-announcement");
         el.textContent = "公告：" + cfg.announcement;

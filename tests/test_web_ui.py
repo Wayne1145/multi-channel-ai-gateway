@@ -23,6 +23,19 @@ def test_qrcode_ui_uses_protected_blob_endpoint_only():
     assert "qrcode_url" not in js
 
 
+def test_login_page_contains_fragment_based_account_activation_flow():
+    html = (ROOT / "web/index.html").read_text(encoding="utf-8")
+    js = (ROOT / "web/static/app.js").read_text(encoding="utf-8")
+
+    assert 'id="confirm-password-input"' in html
+    assert 'id="activation-hint"' in html
+    assert 'location.hash.startsWith("#activate=")' in js
+    assert 'history.replaceState(null, "", location.pathname + location.search)' in js
+    assert '"/api/auth/activate"' in js
+    assert "activation_token" in js
+    assert "confirm_password" in js
+
+
 def test_settings_view_navigation_and_save_wiring():
     html = (ROOT / "web/index.html").read_text(encoding="utf-8")
     js = (ROOT / "web/static/app.js").read_text(encoding="utf-8")
@@ -89,7 +102,7 @@ def test_restricted_tool_settings_group_is_wired():
     html = (ROOT / "web/index.html").read_text(encoding="utf-8")
     js = (ROOT / "web/static/app.js").read_text(encoding="utf-8")
 
-    assert "/static/app.js?v=10" in html
+    assert "/static/app.js?v=11" in html
     assert 'id="mfa-code-input"' in html
     assert 'id="me-mfa-setup"' in html
     assert 'id="admin-mfa-reset"' in html

@@ -86,6 +86,19 @@ class AuthSession(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class AccountActivationToken(Base):
+    """微信渠道签发的短时一次性账号激活凭证；只保存令牌摘要。"""
+
+    __tablename__ = "account_activation_tokens"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), unique=True, index=True
+    )
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class MfaCredential(Base):
     """TOTP 凭据；秘钥加密保存，恢复码只保存不可逆摘要。"""
 

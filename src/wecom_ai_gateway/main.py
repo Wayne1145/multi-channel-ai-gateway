@@ -14,9 +14,11 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from qrcode.image.svg import SvgPathImage
 from sqlalchemy import delete, func, or_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from . import presets as preset_service
+from .account_activation import ActivationError, activate_account
 from .auth import (
     Principal,
     authenticate_password,
@@ -236,6 +238,11 @@ class AccountProvisionIn(LoginIn):
     pass
 
 
+class AccountActivationIn(LoginIn):
+    activation_token: str
+    confirm_password: str
+
+
 @app.get("/api/auth/config")
 def auth_config(db: Session = Depends(db_dep)):
     return {
@@ -361,6 +368,56 @@ def auth_register(body: RegisterIn, db: Session = Depends(db_dep)):
     db.flush()
     token = create_session(db, role="user", user_id=user.id, account_id=account.id)
     return {"token": token, "role": "user", "user_id": user.id, "username": username}
+
+
+@app.post("/api/auth/activate")
+def auth_activate(body: AccountActivationIn, db: Session = Depends(db_dep)):
+    """消费微信渠道签发的短时凭证，为原聊天用户创建后台账号并直接登录。"""
+    if body.password != body.confirm_password:
+        raise HTTPException(400, "两次输入的密码不一致")
+    try:
+        username = normalize_username(body.username)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if username == settings.admin_username.strip().lower():
+        raise HTTPException(409, "用户名已存在")
+    if db.scalar(select(Account).where(Account.username == username)):
+        raise HTTPException(409, "用户名已存在")
+    try:
+        account = activate_account(
+            db,
+            body.activation_token,
+            username,
+            body.password,
+            password_min_length=int(get_runtime_value(db, "password_min_length")),
+        )
+    except (ActivationError, ValueError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+    db.add(
+        AuditLog(
+            user_id=account.user_id,
+            action="account.activate",
+            detail={"username": account.username},
+        )
+    )
+    db.flush()
+    try:
+        token = create_session(
+            db,
+            role="user",
+            user_id=account.user_id,
+            account_id=account.id,
+        )
+    except IntegrityError as exc:
+        # 并发激活时用户名唯一约束可能在预检查后才冲突；回滚会同时恢复未消费令牌。
+        db.rollback()
+        raise HTTPException(409, "用户名已存在") from exc
+    return {
+        "token": token,
+        "role": "user",
+        "user_id": account.user_id,
+        "username": account.username,
+    }
 
 
 @app.post("/api/auth/logout")
