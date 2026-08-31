@@ -9,6 +9,7 @@ import base64
 import hashlib
 import ipaddress
 import logging
+import mimetypes
 import secrets
 from dataclasses import dataclass, field
 
@@ -19,6 +20,9 @@ PROTOCOL_REFERENCE_VERSION = "2.4.6"
 APP_ID = "bot"
 BOT_AGENT = "multi-channel-ai-gateway-clawbot/0.1.0"
 LOGIN_ORIGIN = "https://ilinkai.weixin.qq.com"
+CDN_BASE_URL = "https://novac2c.cdn.weixin.qq.com/c2c"
+INBOUND_DOCUMENT_MAX_BYTES = 10 * 1024 * 1024
+_INBOUND_DOCUMENT_SUFFIXES = {".pdf", ".txt", ".md", ".markdown", ".html", ".htm", ".docx"}
 log = logging.getLogger(__name__)
 
 
@@ -36,6 +40,10 @@ CLIENT_VERSION = _encode_client_version(PROTOCOL_REFERENCE_VERSION)
 
 class SessionExpiredError(RuntimeError):
     """iLink 会话过期，需要重新扫码。"""
+
+
+class LoginQrExpiredError(RuntimeError):
+    """登录二维码已过期；运行时应立即换码，而不是把实例永久标成错误。"""
 
 
 @dataclass(frozen=True)
@@ -144,6 +152,38 @@ def _aes_ecb_decrypt(ciphertext: bytes, key: bytes) -> bytes:
     if not 1 <= pad <= 16 or plain[-pad:] != bytes([pad]) * pad:
         raise ValueError("AES 填充无效")
     return plain[:-pad]
+
+
+def _parse_aes_key(value: str) -> bytes:
+    """兼容 base64(raw 16 bytes) 与 base64(32 位 hex 文本) 两种 iLink 编码。"""
+    try:
+        decoded = base64.b64decode(value, validate=True)
+    except (ValueError, TypeError) as exc:
+        raise ValueError("iLink 媒体 AES key 编码无效") from exc
+    if len(decoded) == 16:
+        return decoded
+    if len(decoded) == 32:
+        try:
+            key = bytes.fromhex(decoded.decode("ascii"))
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise ValueError("iLink 媒体 AES key 编码无效") from exc
+        if len(key) == 16:
+            return key
+    raise ValueError("iLink 媒体 AES key 长度无效")
+
+
+def _document_mime(filename: str) -> str | None:
+    suffix = "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    if suffix not in _INBOUND_DOCUMENT_SUFFIXES:
+        return None
+    overrides = {
+        ".md": "text/markdown",
+        ".markdown": "text/markdown",
+        ".html": "text/html",
+        ".htm": "text/html",
+        ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    }
+    return overrides.get(suffix) or mimetypes.guess_type(filename)[0] or "application/octet-stream"
 
 
 def _aes_padded_size(raw_size: int) -> int:
@@ -302,7 +342,7 @@ class ILinkClient:
                     status,
                     ",".join(sorted(str(key) for key in data)),
                 )
-                raise RuntimeError("登录二维码已过期")
+                raise LoginQrExpiredError("登录二维码已过期")
             if status == "scaned_but_redirect" and data.get("redirect_host"):
                 base_url = f"https://{data['redirect_host']}"
             await asyncio.sleep(1)
@@ -320,12 +360,88 @@ class ILinkClient:
             raise SessionExpiredError("iLink session expired")
         if data.get("ret") not in {None, 0}:
             raise RuntimeError(f"iLink getupdates failed: ret={data.get('ret')}")
-        messages = [
-            parsed
-            for raw in data.get("msgs") or []
-            if (parsed := parse_inbound_text(raw)) is not None
-        ]
+        messages = []
+        for raw in data.get("msgs") or []:
+            parsed = await self.parse_inbound(raw)
+            if parsed is not None:
+                messages.append(parsed)
         return str(data.get("get_updates_buf") or cursor), messages
+
+    async def parse_inbound(self, raw: dict) -> ParsedInboundText | None:
+        """规范化入站消息，并在 Bridge 内完成受限文档下载/解密。
+
+        CDN 参数和 AES key 只在此方法栈内存在；返回给网关的媒体项只含安全元数据与
+        解密后的 base64 字节，raw 协议正文不会跨进程转发。
+        """
+        parsed = parse_inbound_text(raw)
+        if parsed is None:
+            return None
+        media: list[dict] = []
+        for item in raw.get("item_list") or []:
+            safe = _parse_media_item(item)
+            if not safe:
+                continue
+            if safe["media_type"] != "file":
+                media.append(safe)
+                continue
+            detail = item.get("file_item") or {}
+            mime = _document_mime(safe["filename"])
+            if not mime:
+                safe.update(status="rejected", rejected_reason="unsupported_document_type")
+                media.append(safe)
+                continue
+            safe["mime"] = mime
+            if safe["size_bytes"] > INBOUND_DOCUMENT_MAX_BYTES:
+                safe.update(status="rejected", rejected_reason="size_exceeds_limit")
+                media.append(safe)
+                continue
+            try:
+                data = await self._download_inbound_file(detail)
+            except Exception as exc:  # noqa: BLE001 - 只记录异常类型，不能记录 CDN 参数或密钥
+                log.warning("iLink inbound file unavailable error=%s", type(exc).__name__)
+                safe.update(status="rejected", rejected_reason="download_or_decrypt_failed")
+            else:
+                safe["size_bytes"] = len(data)
+                safe["data_base64"] = base64.b64encode(data).decode("ascii")
+            media.append(safe)
+        return ParsedInboundText(
+            sender_id=parsed.sender_id,
+            external_message_id=parsed.external_message_id,
+            context_token=parsed.context_token,
+            content=parsed.content,
+            raw={},
+            media=media,
+        )
+
+    async def _download_inbound_file(self, detail: dict) -> bytes:
+        media = detail.get("media") or {}
+        encrypted_query = str(media.get("encrypt_query_param") or "")
+        aes_key = _parse_aes_key(str(media.get("aes_key") or ""))
+        if not encrypted_query:
+            raise ValueError("iLink 入站文件缺少 CDN 下载参数")
+        encrypted = bytearray()
+        async with (
+            httpx.AsyncClient(timeout=60.0, follow_redirects=False, trust_env=False) as client,
+            client.stream(
+                "GET",
+                f"{CDN_BASE_URL}/download",
+                params={"encrypted_query_param": encrypted_query},
+            ) as response,
+        ):
+            if 300 <= response.status_code < 400:
+                raise ValueError("iLink CDN 不允许重定向")
+            response.raise_for_status()
+            declared = response.headers.get("content-length")
+            if declared and int(declared) > INBOUND_DOCUMENT_MAX_BYTES + 16:
+                raise ValueError("iLink 入站文件超过大小限制")
+            async for chunk in response.aiter_bytes():
+                encrypted.extend(chunk)
+                if len(encrypted) > INBOUND_DOCUMENT_MAX_BYTES + 16:
+                    raise ValueError("iLink 入站文件超过大小限制")
+        plaintext = _aes_ecb_decrypt(bytes(encrypted), aes_key)
+        if len(plaintext) > INBOUND_DOCUMENT_MAX_BYTES:
+            raise ValueError("iLink 入站文件超过大小限制")
+        return plaintext
 
     async def _upload_media_to_cdn(
         self, data: bytes, to_user_id: str, media_type: int

@@ -8,6 +8,7 @@ from wecom_ai_gateway.models import (
     BindCode,
     ChannelIdentity,
     CharacterCard,
+    KnowledgeItem,
     Memory,
     Message,
     Preset,
@@ -34,10 +35,11 @@ def _user(db, name: str, channel: str, external_id: str, account_id: str = "acct
     return user
 
 
-def test_create_bind_code_returns_6_digit_and_replaces_old(db):
+def test_create_bind_code_returns_high_entropy_token_and_replaces_old(db):
     user = _user(db, "A", "wechat_clawbot", "a@im.wechat")
     code1 = create_bind_code(db, user.id)
-    assert len(code1) == 6 and code1.isdigit()
+    assert len(code1) >= 22
+    assert code1.isalnum()
     code2 = create_bind_code(db, user.id)
     assert code1 != code2
     assert db.query(BindCode).filter_by(user_id=user.id).count() == 1
@@ -125,3 +127,45 @@ def test_resolve_bind_deletes_source_account_and_sessions(db):
 
     assert result["ok"] is True
     assert db.query(Account).filter_by(user_id=user_b.id).count() == 0
+
+
+def test_merge_keeps_target_knowledge_item_when_titles_conflict(db):
+    user_a = _user(db, "A", "wechat_clawbot", "a@im.wechat")
+    user_b = _user(db, "B", "wecom_kf", "b-ext", "wk-b")
+    db.add(KnowledgeItem(user_id=user_a.id, title="同名手册", content="目标版本"))
+    db.add(KnowledgeItem(user_id=user_b.id, title="同名手册", content="源版本"))
+    db.commit()
+    code = create_bind_code(db, user_a.id)
+
+    result = resolve_bind(
+        db,
+        code,
+        user_id=user_b.id,
+        channel="wecom_kf",
+        account_id="wk-b",
+        external_id="b-ext",
+    )
+
+    assert result["ok"] is True
+    rows = db.query(KnowledgeItem).filter_by(user_id=user_a.id, title="同名手册").all()
+    assert len(rows) == 1
+    assert rows[0].content == "目标版本"
+
+
+def test_merge_preview_does_not_expose_internal_user_ids_and_reports_all_lossy_conflicts(db):
+    from wecom_ai_gateway.binding import merge_preview
+
+    target = _user(db, "A", "wechat_clawbot", "a@im.wechat")
+    source = _user(db, "B", "wecom_kf", "b-ext", "wk-b")
+    db.add(KnowledgeItem(user_id=target.id, title="同名手册", content="目标版本"))
+    db.add(KnowledgeItem(user_id=source.id, title="同名手册", content="源版本"))
+    db.commit()
+    code = create_bind_code(db, source.id)
+
+    preview = merge_preview(db, code, target_user_id=target.id)
+
+    assert "source_user_id" not in preview
+    assert "target_user_id" not in preview
+    assert preview["counts"]["knowledge_items"] == 1
+    assert preview["conflicts"]["knowledge_titles"] == ["同名手册"]
+    assert preview["conflicts"]["user_settings"] is True

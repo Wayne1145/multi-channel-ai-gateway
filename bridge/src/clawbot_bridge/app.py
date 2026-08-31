@@ -14,6 +14,8 @@ class BridgeRuntime(Protocol):
 
     async def stop(self, instance_id: str) -> None: ...
 
+    def status(self, instance_id: str) -> dict: ...
+
     async def send(
         self,
         instance_id: str,
@@ -61,6 +63,10 @@ def create_app(*, runtime: BridgeRuntime, bridge_token: str) -> FastAPI:
     async def stop_instance(instance_id: str) -> dict:
         await runtime.stop(instance_id)
         return {"ok": True}
+
+    @app.get("/instances/{instance_id}/status", dependencies=[Depends(authorize)])
+    async def instance_status(instance_id: str) -> dict:
+        return runtime.status(instance_id)
 
     @app.post("/instances/{instance_id}/messages", dependencies=[Depends(authorize)])
     async def send_message(instance_id: str, message: OutboundMessage) -> dict:

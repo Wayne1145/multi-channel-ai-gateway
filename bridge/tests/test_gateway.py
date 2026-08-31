@@ -36,8 +36,36 @@ async def test_gateway_client_forwards_normalized_inbound_text() -> None:
         "message_type": "text",
         "content": "你好",
         "media": [],
-        "raw": {"message_type": 1},
     }
+
+
+@pytest.mark.anyio
+async def test_gateway_client_forwards_decrypted_file_only_over_internal_bearer() -> None:
+    client = GatewayClient(base_url="http://gateway:8080", bridge_token="bridge-secret")
+    message = InboundTextMessage(
+        sender_id="user@im.wechat",
+        external_message_id="file-1",
+        content="",
+        media=[
+            {
+                "media_type": "file",
+                "mime": "application/pdf",
+                "filename": "guide.pdf",
+                "size_bytes": 4,
+                "data_base64": "JVBERg==",
+            }
+        ],
+    )
+    with respx.mock(assert_all_called=True) as router:
+        route = router.post(
+            "http://gateway:8080/api/internal/channel-instances/instance-1/messages"
+        ).mock(return_value=httpx.Response(200, json={"accepted": True}))
+        assert await client.forward("instance-1", message) is True
+
+    payload = json.loads(route.calls[0].request.content)
+    assert route.calls[0].request.headers["authorization"] == "Bearer bridge-secret"
+    assert payload["media"][0]["data_base64"] == "JVBERg=="
+    assert "raw" not in payload
 
 
 def test_gateway_client_rejects_url_with_query_credentials() -> None:

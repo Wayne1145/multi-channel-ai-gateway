@@ -7,7 +7,12 @@ from dataclasses import dataclass, field
 from typing import Protocol
 
 from .gateway import GatewayClient, InboundTextMessage
-from .ilink import ILinkCredentials, ParsedInboundText, SessionExpiredError
+from .ilink import (
+    ILinkCredentials,
+    LoginQrExpiredError,
+    ParsedInboundText,
+    SessionExpiredError,
+)
 from .state import EncryptedStateStore, StoredInstanceState
 
 log = logging.getLogger(__name__)
@@ -67,6 +72,7 @@ class InstanceState:
     account_id: str | None = None
     context_tokens: dict[str, str] = field(default_factory=dict)
     task: asyncio.Task | None = None
+    report_task: asyncio.Task | None = None
     error: str | None = None
     desired_running: bool = True
 
@@ -86,6 +92,16 @@ class BridgeRuntime:
         self._state_store = state_store
         self._instances: dict[str, InstanceState] = {}
         self._lock = asyncio.Lock()
+
+    async def _cancel_report_task(self, state: InstanceState) -> None:
+        task = state.report_task
+        state.report_task = None
+        if task and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
     async def restore_all(self) -> list[str]:
         """进程启动时恢复数据卷中的全部有效加密会话。"""
@@ -147,21 +163,15 @@ class BridgeRuntime:
             await self._monitor_online(instance_id, state)
         except asyncio.CancelledError:
             raise
+        except LoginQrExpiredError:
+            await self._rotate_login(instance_id, state)
         except SessionExpiredError:
             if self._state_store:
                 self._state_store.clear(instance_id)
-            pending = await self._login_provider.start_login()
-            state.pending = pending
             state.credentials = None
             state.account_id = None
             state.context_tokens.clear()
-            state.status = "pending_login"
-            await self._gateway.report_status(
-                instance_id,
-                status="pending_login",
-                qrcode_url=pending.qrcode_url,
-            )
-            state.task = asyncio.create_task(self._run_instance(instance_id, state))
+            await self._rotate_login(instance_id, state)
         except Exception as exc:  # noqa: BLE001 - 后台任务必须把任意协议异常转换为可观察状态
             state.status = "error"
             state.error = type(exc).__name__
@@ -180,33 +190,73 @@ class BridgeRuntime:
 
     async def _run_online_instance(self, instance_id: str, state: InstanceState) -> None:
         try:
-            await self._gateway.report_status(
-                instance_id,
-                status="online",
-                account_id=state.account_id,
+            # 状态回调是旁路；有效 iLink 会话必须立即开始轮询，不能被网关启动竞态阻断。
+            state.report_task = asyncio.create_task(
+                self._report_restored_online(instance_id, state, state.account_id)
             )
             await self._monitor_online(instance_id, state)
         except SessionExpiredError:
+            await self._cancel_report_task(state)
             if self._state_store:
                 self._state_store.clear(instance_id)
-            pending = await self._login_provider.start_login()
-            state.pending = pending
             state.credentials = None
             state.account_id = None
             state.context_tokens.clear()
-            state.status = "pending_login"
-            await self._gateway.report_status(
-                instance_id,
-                status="pending_login",
-                qrcode_url=pending.qrcode_url,
-            )
-            state.task = asyncio.create_task(self._run_instance(instance_id, state))
+            await self._rotate_login(instance_id, state)
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 - 后台任务异常必须转换为可观察状态
+            await self._cancel_report_task(state)
             state.status = "error"
             state.error = type(exc).__name__
             log.error("Restored ClawBot instance failed instance=%s error=%s", instance_id, type(exc).__name__)
+            try:
+                await self._gateway.report_status(
+                    instance_id,
+                    status="error",
+                    error=type(exc).__name__,
+                )
+            except Exception as report_exc:  # noqa: BLE001 - 回调失败不能覆盖原始状态
+                log.error(
+                    "Failed to report restored ClawBot status instance=%s error=%s",
+                    instance_id,
+                    type(report_exc).__name__,
+                )
+
+    async def _report_restored_online(
+        self, instance_id: str, state: InstanceState, account_id: str | None
+    ) -> None:
+        """容器并行启动时等待网关 API 就绪；状态回调失败不能杀死有效 iLink 会话。"""
+        delays = (0, 1, 2, 5, 10, 30)
+        for attempt, delay in enumerate(delays):
+            if state.stop_event.is_set():
+                return
+            if delay:
+                try:
+                    await asyncio.wait_for(state.stop_event.wait(), timeout=delay)
+                    return
+                except TimeoutError:
+                    pass
+            try:
+                await self._gateway.report_status(
+                    instance_id,
+                    status="online",
+                    account_id=account_id,
+                )
+                return
+            except Exception as exc:  # noqa: BLE001 - 启动期内部回调只记录异常类型后重试
+                if attempt == len(delays) - 1:
+                    log.error(
+                        "Gateway status callback unavailable after retries instance=%s error=%s",
+                        instance_id,
+                        type(exc).__name__,
+                    )
+                    return
+                log.warning(
+                    "Gateway status callback unavailable during restore instance=%s error=%s retrying",
+                    instance_id,
+                    type(exc).__name__,
+                )
 
     async def _monitor_online(self, instance_id: str, state: InstanceState) -> None:
         if not state.credentials:
@@ -232,6 +282,30 @@ class BridgeRuntime:
             on_message,
             state.stop_event,
         )
+
+    async def _rotate_login(self, instance_id: str, state: InstanceState) -> None:
+        """生成新二维码并继续等待登录；每次任务只安排一个后继任务。"""
+        if state.stop_event.is_set():
+            return
+        await self._cancel_report_task(state)
+        pending = await self._login_provider.start_login()
+        state.pending = pending
+        state.status = "pending_login"
+        state.error = None
+        # 先建立后继登录任务，回调失败也不能让实例永久卡在 pending_login。
+        state.task = asyncio.create_task(self._run_instance(instance_id, state))
+        try:
+            await self._gateway.report_status(
+                instance_id,
+                status="pending_login",
+                qrcode_url=pending.qrcode_url,
+            )
+        except Exception as exc:  # noqa: BLE001 - 登录任务已建立，状态对账会补偿回调
+            log.warning(
+                "Failed to report rotated login status instance=%s error=%s",
+                instance_id,
+                type(exc).__name__,
+            )
 
     def _save_state(self, instance_id: str, state: InstanceState) -> None:
         if not self._state_store or not state.credentials or not state.account_id:
@@ -272,6 +346,7 @@ class BridgeRuntime:
                     await state.task
                 except asyncio.CancelledError:
                     pass
+            await self._cancel_report_task(state)
             state.status = "offline"
 
     async def send(

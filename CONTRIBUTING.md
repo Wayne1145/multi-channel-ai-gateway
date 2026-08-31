@@ -4,7 +4,7 @@
 
 ```bash
 uv sync --extra dev
-uv run ruff check src tests
+uv run ruff check src tests migrations
 uv run pytest
 ```
 

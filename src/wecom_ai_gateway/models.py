@@ -2,6 +2,7 @@ import enum
 import uuid
 from datetime import datetime
 
+from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     JSON,
     Boolean,
@@ -99,6 +100,22 @@ class AccountActivationToken(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class PasswordResetToken(Base):
+    """可信聊天渠道签发的短时一次性密码重置凭证；只保存摘要。"""
+
+    __tablename__ = "password_reset_tokens"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), unique=True, index=True
+    )
+    account_id: Mapped[str] = mapped_column(
+        ForeignKey("accounts.id", ondelete="CASCADE"), index=True
+    )
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class MfaCredential(Base):
     """TOTP 凭据；秘钥加密保存，恢复码只保存不可逆摘要。"""
 
@@ -149,6 +166,8 @@ class ChannelIdentity(Base):
     account_id: Mapped[str] = mapped_column(String(128))
     external_id_hash: Mapped[str] = mapped_column(String(64), index=True)
     external_id_encrypted: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     user: Mapped[User] = relationship()
 
 
@@ -286,16 +305,26 @@ class PlatformConfig(Base):
 
 
 class KnowledgeItem(Base):
-    """用户知识库条目；内容按用户隔离，用于检索增强。"""
+    """用户知识文档；内容加密存储，管理员只读取来源元数据。"""
 
     __tablename__ = "knowledge_items"
     __table_args__ = (UniqueConstraint("user_id", "title", name="uq_knowledge_user_title"),)
     id: Mapped[str] = mapped_column(
         String(36), primary_key=True, default=lambda: str(uuid.uuid4())
     )
-    user_id: Mapped[str] = mapped_column(String(36), index=True)
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
     title: Mapped[str] = mapped_column(String(255))
-    content: Mapped[str] = mapped_column(Text)
+    content: Mapped[str] = mapped_column(Text, default="")
+    content_encrypted: Mapped[str | None] = mapped_column(Text)
+    content_sha256: Mapped[str | None] = mapped_column(String(64), index=True)
+    source_type: Mapped[str] = mapped_column(String(30), default="text")
+    source_name: Mapped[str | None] = mapped_column(String(255))
+    source_url: Mapped[str | None] = mapped_column(String(1000))
+    mime_type: Mapped[str | None] = mapped_column(String(160))
+    content_chars: Mapped[int] = mapped_column(Integer, default=0)
+    indexed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
@@ -304,11 +333,37 @@ class KnowledgeItem(Base):
     )
 
 
+class KnowledgeChunk(Base):
+    """加密知识分块；向量列在 PostgreSQL 使用 pgvector，SQLite 测试使用 JSON。"""
+
+    __tablename__ = "knowledge_chunks"
+    __table_args__ = (
+        UniqueConstraint("item_id", "chunk_index", name="uq_knowledge_chunk_index"),
+    )
+    id: Mapped[str] = mapped_column(
+        String(36), primary_key=True, default=lambda: str(uuid.uuid4())
+    )
+    item_id: Mapped[str] = mapped_column(
+        ForeignKey("knowledge_items.id", ondelete="CASCADE"), index=True
+    )
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    chunk_index: Mapped[int] = mapped_column(Integer)
+    content_encrypted: Mapped[str] = mapped_column(Text)
+    content_sha256: Mapped[str] = mapped_column(String(64), index=True)
+    embedding: Mapped[list] = mapped_column(Vector(256).with_variant(JSON, "sqlite"))
+    char_count: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
 class BindCode(Base):
-    """跨渠道身份绑定码：6 位数字、短时效、一次性。"""
+    """跨渠道身份绑定令牌：至少 128 位熵、短时效、一次性。"""
 
     __tablename__ = "bind_codes"
-    code: Mapped[str] = mapped_column(String(8), primary_key=True)
+    code: Mapped[str] = mapped_column(String(64), primary_key=True)
     user_id: Mapped[str] = mapped_column(String(36), index=True)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
@@ -474,6 +529,14 @@ class ChannelInstance(Base):
     login_state: Mapped[dict] = mapped_column(JSON, default=dict)
     session_encrypted: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(20), default="offline")
+    # 控制意图与实时快照分离：False 仅表示用户明确停止，不能由网络故障推断。
+    desired_running: Mapped[bool] = mapped_column(Boolean, default=False)
+    status_revision: Mapped[int] = mapped_column(Integer, default=0)
+    status_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_online_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error: Mapped[str | None] = mapped_column(String(120))
     config: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
@@ -499,8 +562,8 @@ class Preset(Base):
 class MediaAsset(Base):
     """渠道媒体消息的安全元数据记录。
 
-    只保存媒体元数据与内容哈希，不主动从外部 URL 拉取/落盘原始文件
-    （避免 SSRF 与存储膨胀）；expires_at 到期后由 Worker 定时清理。
+    默认只保存媒体元数据与内容哈希。受信 Bridge 解密的受限文档只保存提取后的
+    Fernet 密文正文，不保存原始文件、CDN URL 或 AES key；到期后由 Worker 清理。
     """
 
     __tablename__ = "media_assets"
@@ -514,6 +577,8 @@ class MediaAsset(Base):
     size_bytes: Mapped[int] = mapped_column(Integer, default=0)
     filename: Mapped[str | None] = mapped_column(String(255))
     sha256: Mapped[str | None] = mapped_column(String(64), index=True)
+    content_encrypted: Mapped[str | None] = mapped_column(Text)
+    content_chars: Mapped[int] = mapped_column(Integer, default=0)
     # 原始媒体定位（渠道侧 id/URL）。URL 可能含渠道凭据，管理端 API 一律不返回。
     storage_key: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(20), default="stored")  # stored | rejected | expired

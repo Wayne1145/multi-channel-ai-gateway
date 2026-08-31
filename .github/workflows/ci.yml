@@ -19,13 +19,18 @@ jobs:
           python-version: "3.12"
       - name: 安装项目与开发依赖
         run: uv sync --extra dev --locked
-      - name: 运行 Ruff 静态检查
-        run: uv run ruff check src tests
+      - name: 验证锁文件与 Ruff 静态检查
+        run: |
+          uv lock --check
+          uv run ruff check src tests migrations
+          uv run python -m compileall -q src migrations tests
+          node --check web/static/app.js
       - name: 运行测试与覆盖率检查
         run: uv run pytest --cov=wecom_ai_gateway --cov-report=term-missing
       - name: 安装并测试可选 ClawBot Bridge
         run: |
           cd bridge
+          uv lock --check
           uv sync --extra dev --locked
           uv run ruff check src tests
           uv run pytest
@@ -33,3 +38,7 @@ jobs:
         run: docker build -t multi-channel-ai-gateway:test .
       - name: 构建 ClawBot Bridge 镜像
         run: docker build -t multi-channel-clawbot-bridge:test bridge
+      - name: 验证 Compose 配置
+        run: |
+          cp .env.example .env
+          POSTGRES_PASSWORD=ci-placeholder docker compose config --quiet

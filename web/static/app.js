@@ -14,6 +14,7 @@
   let registering = false;
   let mfaChallenge = "";
   let activationToken = "";
+  let resetToken = "";
   if (location.hash.startsWith("#activate=")) {
     try {
       activationToken = decodeURIComponent(location.hash.slice("#activate=".length));
@@ -21,6 +22,15 @@
       activationToken = "";
     }
     // 令牌位于 fragment，不会发送给服务器；读取后立即从地址栏和历史中移除。
+    history.replaceState(null, "", location.pathname + location.search);
+  }
+  if (location.hash.startsWith("#reset=")) {
+    try {
+      resetToken = decodeURIComponent(location.hash.slice("#reset=".length));
+    } catch (_) {
+      resetToken = "";
+    }
+    // 与激活令牌相同：fragment 不进入服务端日志，读取后立即从地址栏清除。
     history.replaceState(null, "", location.pathname + location.search);
   }
 
@@ -115,14 +125,16 @@
     const password = $("password-input").value;
     const mfaCode = $("mfa-code-input").value.trim();
     const confirmPassword = $("confirm-password-input").value;
-    if ((!username || !password) && !mfaChallenge) return;
-    if (activationToken && !confirmPassword) return;
+    if ((!username || !password) && !mfaChallenge && !resetToken) return;
+    if ((activationToken || resetToken) && !confirmPassword) return;
     if (mfaChallenge && !mfaCode) return;
     btn.disabled = true;
     err.classList.add("hidden");
     try {
       const path = mfaChallenge
         ? "/api/auth/mfa/verify"
+        : resetToken
+          ? "/api/auth/reset-password"
         : activationToken
           ? "/api/auth/activate"
           : registering
@@ -130,6 +142,8 @@
             : "/api/auth/login";
       const payload = mfaChallenge
         ? { challenge_token: mfaChallenge, code: mfaCode }
+        : resetToken
+          ? { reset_token: resetToken, password, confirm_password: confirmPassword }
         : activationToken
           ? { activation_token: activationToken, username, password, confirm_password: confirmPassword }
           : { username, password };
@@ -149,6 +163,22 @@
         $("register-toggle").classList.add("hidden");
         $("mfa-cancel").classList.remove("hidden");
         $("mfa-code-input").focus();
+        return;
+      }
+      if (resetToken) {
+        resetToken = "";
+        $("password-input").value = "";
+        $("confirm-password-input").value = "";
+        $("confirm-password-input").classList.add("hidden");
+        $("username-input").classList.remove("hidden");
+        $("username-input").disabled = false;
+        $("username-input").value = auth.username || "";
+        $("login-btn").textContent = "登录";
+        $("activation-hint").textContent = auth.mfa_preserved
+          ? "密码已重置。你的 MFA 仍然有效，请使用新密码登录后完成二次验证。"
+          : "密码已重置，请使用新密码登录。";
+        $("activation-hint").classList.remove("hidden");
+        document.querySelector(".login-sub").textContent = "AI Gateway · 账户中心";
         return;
       }
       token = auth.token;
@@ -179,6 +209,17 @@
     $("login-btn").textContent = "创建账号并登录";
     $("register-toggle").classList.add("hidden");
     document.querySelector(".login-sub").textContent = "微信用户 · 激活账户";
+  }
+  if (resetToken) {
+    $("username-input").classList.add("hidden");
+    $("username-input").disabled = true;
+    $("password-input").setAttribute("autocomplete", "new-password");
+    $("confirm-password-input").classList.remove("hidden");
+    $("activation-hint").textContent = "设置新密码后，请按正常流程登录；已启用的 MFA 不会被关闭。";
+    $("activation-hint").classList.remove("hidden");
+    $("login-btn").textContent = "设置新密码";
+    $("register-toggle").classList.add("hidden");
+    document.querySelector(".login-sub").textContent = "微信用户 · 找回密码";
   }
   $("mfa-cancel").addEventListener("click", () => {
     mfaChallenge = "";
@@ -465,6 +506,11 @@
   /* ---------- 渠道实例 ---------- */
   const instanceBase = () => principal?.role === "admin"
     ? "/api/admin/channel-instances" : "/api/me/channel-instances";
+  const CHANNEL_STATUS_LABELS = {
+    online: "已连接", logging_in: "等待扫码", reconnecting: "自动重连中",
+    offline: "已停止", error: "连接异常",
+  };
+  let instanceRefreshTimer = null;
 
   async function openQrcode(instanceId) {
     $("qrcode-modal").classList.remove("hidden");
@@ -495,8 +541,11 @@
             <td>${esc(i.instance_name)}</td>
             <td class="mono">${esc(i.channel)}</td>
             <td>
-              <span class="badge badge-${i.status === "online" ? "ok" : i.status === "error" ? "dead" : "ignored"}">${esc(i.status)}</span>
+              <span class="badge badge-${i.status === "online" ? "ok" : i.status === "error" ? "dead" : "ignored"}">${esc(CHANNEL_STATUS_LABELS[i.status] || i.status)}</span>
               ${i.login?.qrcode_available ? `<button class="btn btn-sm" data-qrcode="${i.id}">扫码登录</button>` : ""}
+              <div class="small muted">最近在线：${esc((i.last_online_at || "—").replace("T", " ").slice(0, 16))}</div>
+              <div class="small ${i.last_error ? "text-danger" : "muted"}">${esc(i.last_error || "")}</div>
+              <div class="small muted">检查：${esc((i.last_checked_at || "—").replace("T", " ").slice(0, 16))}</div>
             </td>
             <td class="mono small">${esc((i.owner_user_id || "—").slice(0, 12))}</td>
             <td class="mono small">${esc((i.created_at || "").replace("T", " ").slice(0, 19))}</td>
@@ -529,8 +578,9 @@
         }));
       document.querySelectorAll("[data-qrcode]").forEach((b) =>
         b.addEventListener("click", () => openQrcode(b.dataset.qrcode)));
-      if (rows.some((i) => i.status === "logging_in")) {
-        setTimeout(loadInstances, 3000);
+      clearTimeout(instanceRefreshTimer);
+      if (document.querySelector('.nav-item.active')?.dataset.view === "instances") {
+        instanceRefreshTimer = setTimeout(loadInstances, rows.some((i) => i.status === "logging_in") ? 3000 : 15000);
       }
     } catch (ex) {
       toast(ex.message, true);
@@ -907,7 +957,7 @@
   }
 
   /* ---------- 我的设置（用户自助中心） ---------- */
-  let myCards = [], myPresets = [], myMemories = [], myProviders = [], mySessions = [];
+  let myCards = [], myPresets = [], myMemories = [], myProviders = [], mySessions = [], myIdentities = [], myKnowledge = [];
   let editingCardId = null;
 
   function escHtml(v) {
@@ -926,15 +976,15 @@
         renderMfaStatus(await api("/api/auth/mfa/status"));
         return;
       }
-      const [cards, presets, memories, providers, sessions, usage, mfa] = await Promise.all([
+      const [cards, presets, memories, providers, sessions, usage, mfa, identities, knowledge] = await Promise.all([
         api("/api/me/cards"), api("/api/me/presets"), api("/api/me/memories"),
         api("/api/me/providers"), api("/api/me/sessions"), api("/api/me/usage?days=7"),
-        api("/api/auth/mfa/status"),
+        api("/api/auth/mfa/status"), api("/api/me/identities"), api("/api/me/knowledge"),
       ]);
       myCards = cards; myPresets = presets; myMemories = memories;
-      myProviders = providers; mySessions = sessions;
+      myProviders = providers; mySessions = sessions; myIdentities = identities; myKnowledge = knowledge;
       renderMyCards(); renderMyPresets(); renderMyMemories(); renderMyProviders();
-      renderMySessions(); renderMyUsage(usage); renderMfaStatus(mfa);
+      renderMySessions(); renderMyIdentities(); renderMyKnowledge(); renderMyUsage(usage); renderMfaStatus(mfa);
     } catch (ex) { toast(ex.message, true); }
   }
 
@@ -1044,6 +1094,53 @@
       }));
   }
 
+  function renderMyKnowledge() {
+    $("me-knowledge-tbody").innerHTML = myKnowledge.length
+      ? myKnowledge.map((item) => `
+          <tr>
+            <td>${escHtml(item.title)}</td>
+            <td class="small">${escHtml(item.source_name || item.source_type)}</td>
+            <td class="mono small">${item.content_chars || 0}</td>
+            <td class="small muted">${escHtml((item.indexed_at || "—").replace("T", " ").slice(0, 16))}</td>
+            <td class="me-actions"><button class="btn btn-sm" data-knowledge-reindex="${item.id}">重建索引</button><button class="btn btn-sm btn-danger" data-knowledge-delete="${item.id}">删除</button></td>
+          </tr>`).join("")
+      : '<tr><td colspan="5" class="muted">知识库为空</td></tr>';
+    document.querySelectorAll("[data-knowledge-reindex]").forEach((b) =>
+      b.addEventListener("click", async () => {
+        await api(`/api/me/knowledge/${b.dataset.knowledgeReindex}/reindex`, { method: "POST" });
+        toast("索引已重建"); loadMySettings();
+      }));
+    document.querySelectorAll("[data-knowledge-delete]").forEach((b) =>
+      b.addEventListener("click", async () => {
+        if (!window.confirm("确认删除该知识文档？")) return;
+        await api(`/api/me/knowledge/${b.dataset.knowledgeDelete}`, { method: "DELETE" });
+        toast("文档已删除"); loadMySettings();
+      }));
+  }
+
+  function renderMyIdentities() {
+    $("me-identity-tbody").innerHTML = myIdentities.length
+      ? myIdentities.map((i) => `
+          <tr>
+            <td>${escHtml(i.channel)}</td>
+            <td class="mono small">${escHtml(i.masked_external_id)}</td>
+            <td class="mono small">${escHtml(i.account_id)}</td>
+            <td class="small muted">${escHtml((i.last_seen_at || "—").replace("T", " ").slice(0, 16))}</td>
+            <td><button class="btn btn-sm btn-danger" data-identity-unbind="${i.id}">解绑</button></td>
+          </tr>`).join("")
+      : '<tr><td colspan="5" class="muted">暂无渠道身份</td></tr>';
+    document.querySelectorAll("[data-identity-unbind]").forEach((b) =>
+      b.addEventListener("click", async () => {
+        const password = window.prompt("请输入当前密码确认解绑");
+        if (!password || !window.confirm("确认解绑该渠道身份？至少必须保留一个身份。")) return;
+        await api(`/api/me/identities/${b.dataset.identityUnbind}/unbind`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ password, confirm: "UNBIND" }),
+        });
+        toast("身份已解绑"); loadMySettings();
+      }));
+  }
+
   function renderMySessions() {
     $("me-session-tbody").innerHTML = mySessions.length
       ? mySessions.map((s) => `
@@ -1068,6 +1165,54 @@
   }
 
   function bindMySettings() {
+    $("me-knowledge-upload").addEventListener("click", async () => {
+      const file = $("me-knowledge-file").files[0];
+      const title = $("me-knowledge-title").value.trim() || file?.name || "";
+      if (!file || !title) return toast("请选择文件并填写标题", true);
+      const form = new FormData(); form.append("title", title); form.append("file", file);
+      await api("/api/me/knowledge/upload", { method: "POST", body: form });
+      toast("文档已加密并建立索引"); loadMySettings();
+    });
+    $("me-knowledge-url-add").addEventListener("click", async () => {
+      const url = $("me-knowledge-url").value.trim();
+      const title = $("me-knowledge-title").value.trim();
+      if (!url || !title) return toast("请填写标题和公开 HTTPS 地址", true);
+      await api("/api/me/knowledge/url", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title, url }) });
+      toast("网页已导入"); loadMySettings();
+    });
+    $("me-knowledge-search-btn").addEventListener("click", async () => {
+      const q = $("me-knowledge-search").value.trim();
+      if (!q) return;
+      const rows = await api(`/api/me/knowledge/search?q=${encodeURIComponent(q)}`);
+      $("me-knowledge-results").innerHTML = rows.length
+        ? rows.map((r) => `<p><b>${escHtml(r.citation)}</b> ${escHtml(r.source_name)} · ${escHtml(r.text.slice(0, 180))}</p>`).join("")
+        : "没有找到相关内容。";
+    });
+    $("me-identity-bind-code").addEventListener("click", async () => {
+      const result = await api("/api/me/identities/bind-code", { method: "POST" });
+      $("me-identity-bind-code-value").textContent = `${result.code} · 10 分钟有效`;
+      $("me-identity-bind-code-value").classList.remove("hidden");
+    });
+    $("me-identity-merge").addEventListener("click", async () => {
+      const code = $("me-identity-merge-code").value.trim();
+      if (!code) return toast("请输入绑定码", true);
+      const password = window.prompt("请输入当前密码以查看合并预览");
+      if (!password) return;
+      const preview = await api("/api/me/identities/merge-preview", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code, password }),
+      });
+      const conflicts = [...(preview.conflicts.card_names || []), ...(preview.conflicts.preset_names || []), ...(preview.conflicts.knowledge_titles || [])];
+      const settingsNotice = preview.conflicts.user_settings ? "源账号个性化设置将不覆盖当前账号。" : "";
+      const summary = `将迁移 ${preview.counts.identities} 个身份、${preview.counts.messages} 条消息、${preview.counts.memories} 条记忆、${preview.counts.knowledge_items || 0} 份知识文档。${conflicts.length ? `同名项目将保留当前账号版本：${conflicts.join("、")}。` : "没有同名冲突。"}${settingsNotice}`;
+      if (!window.confirm(summary)) return;
+      await api("/api/me/identities/merge", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code, password, confirm: "MERGE" }),
+      });
+      $("me-identity-merge-code").value = "";
+      toast("身份与数据已合并"); loadMySettings();
+    });
     $("me-card-new").addEventListener("click", async () => {
       const name = $("me-card-name").value.trim();
       if (!name) return toast("请填写卡片名称", true);

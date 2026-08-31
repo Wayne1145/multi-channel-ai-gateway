@@ -36,6 +36,15 @@ class ClawBotAdapter(ChannelAdapter):
     async def stop_instance(self, instance_id: str) -> None:
         await self._post(f"/instances/{instance_id}/stop", {})
 
+    async def instance_status(self, instance_id: str) -> dict:
+        """读取 Bridge 内存中的实时公开状态，并再次执行字段白名单。"""
+        data = await self._request("GET", f"/instances/{instance_id}/status")
+        return {
+            key: value
+            for key, value in data.items()
+            if key in {"status", "qrcode_url", "account_id", "error"}
+        }
+
     async def send(self, message: OutgoingMessage) -> str:
         data = await self._post(
             f"/instances/{message.instance_id}/messages",
@@ -58,6 +67,14 @@ class ClawBotAdapter(ChannelAdapter):
         return await self.send(message)
 
     async def _post(self, path: str, payload: dict[str, Any]) -> dict:
+        return await self._request("POST", path, payload)
+
+    async def _request(
+        self,
+        method: str,
+        path: str,
+        payload: dict[str, Any] | None = None,
+    ) -> dict:
         try:
             async with httpx.AsyncClient(timeout=settings.clawbot_request_timeout_seconds) as client:
                 headers = (
@@ -65,7 +82,12 @@ class ClawBotAdapter(ChannelAdapter):
                     if settings.clawbot_bridge_token
                     else {}
                 )
-                response = await client.post(self._url(path), json=payload, headers=headers)
+                response = await client.request(
+                    method,
+                    self._url(path),
+                    json=payload if method != "GET" else None,
+                    headers=headers,
+                )
                 response.raise_for_status()
                 data = response.json()
         except httpx.HTTPError as exc:

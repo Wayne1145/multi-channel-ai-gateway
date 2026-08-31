@@ -1,13 +1,15 @@
 """媒体消息安全生命周期。
 
 原则：
-- 只记录媒体**元数据**（类型/大小/哈希/渠道定位），不主动从外部 URL 拉取
-  或落盘原始文件，避免 SSRF 与存储膨胀；
+- 默认只记录媒体**元数据**（类型/大小/哈希/渠道定位）；
+- 受信 Bridge 可提交已解密、限额的文档字节。API 只提取文本并 Fernet 加密，
+  不落盘原始文件，也不接收 CDN URL/AES key；
 - 类型与大小在白名单/上限内才标记 stored；超限记录为 rejected 便于审计；
 - expires_at 到期后由 Worker 周期调用 ``cleanup_expired_media`` 删除记录；
 - 管理 API 只返回脱敏元数据，绝不返回可能携带渠道凭据的 storage_key/URL。
 """
 
+import base64
 import hashlib
 from datetime import UTC, datetime, timedelta
 
@@ -15,8 +17,10 @@ from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from .config import settings
+from .knowledge import extract_document_text_isolated
 from .models import MediaAsset
 from .runtime_settings import get_runtime_value
+from .security import encrypt_secret
 
 # 媒体类型 → 允许的 mime 前缀（宽松匹配，允许带 charset 等参数）
 _ALLOWED_PREFIXES = {
@@ -24,6 +28,8 @@ _ALLOWED_PREFIXES = {
     "voice": ("audio/", "application/octet-stream"),
     "file": ("application/", "text/", "audio/", "image/"),
 }
+_MAX_INLINE_DOCUMENT_BYTES = 10 * 1024 * 1024
+_MAX_INLINE_DOCUMENT_BASE64_CHARS = ((_MAX_INLINE_DOCUMENT_BYTES + 2) // 3) * 4
 
 
 def _allowed_mimes(db: Session | None = None) -> set[str]:
@@ -84,6 +90,34 @@ def record_media_items(
         media_type = _classify(mime, item.get("media_type") or item.get("type"))
         size = int(item.get("size_bytes") or 0)
         ok, reason = validate_media_item(item, db)
+        document_text = ""
+        data: bytes | None = None
+        encoded = item.get("data_base64")
+        if encoded:
+            encoded_text = str(encoded)
+            if len(encoded_text) > _MAX_INLINE_DOCUMENT_BASE64_CHARS:
+                ok, reason = False, "size_exceeds_limit:10485760"
+            try:
+                data = base64.b64decode(encoded_text, validate=True) if ok else None
+            except (ValueError, TypeError):
+                ok, reason = False, "invalid_base64"
+            if data is not None and len(data) > _MAX_INLINE_DOCUMENT_BYTES:
+                ok, reason = False, "size_exceeds_limit:10485760"
+            if data is not None:
+                # Bridge 报文大小只作预检；最终以解码后的真实字节数执行平台限额和审计。
+                size = len(data)
+                runtime_limit = int(get_runtime_value(db, "media_max_size_bytes"))
+                if size > runtime_limit:
+                    ok, reason = False, f"size_exceeds_limit:{runtime_limit}"
+            if ok and data is not None and media_type == "file":
+                try:
+                    document_text = extract_document_text_isolated(
+                        data,
+                        mime or "application/octet-stream",
+                        str(item.get("filename") or "file"),
+                    )
+                except Exception:  # noqa: BLE001 - 不可信文档解析失败必须降级为拒绝，不能击穿入站循环
+                    ok, reason = False, "document_parse_failed"
         storage_key = item.get("url") or item.get("file_id") or item.get("media_id")
         row = MediaAsset(
             message_id=message_id,
@@ -92,7 +126,9 @@ def record_media_items(
             mime=mime,
             size_bytes=size,
             filename=(item.get("filename") or "")[:255] or None,
-            sha256=_sha256_hex(item.get("data")),
+            sha256=_sha256_hex(data or item.get("data")),
+            content_encrypted=encrypt_secret(document_text) if ok and data is not None else None,
+            content_chars=len(document_text),
             storage_key=str(storage_key)[:2000] if storage_key else None,
             status="stored" if ok else "rejected",
             rejected_reason=reason,

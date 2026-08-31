@@ -36,6 +36,19 @@ def test_login_page_contains_fragment_based_account_activation_flow():
     assert "confirm_password" in js
 
 
+def test_login_page_contains_fragment_based_password_reset_flow():
+    html = (ROOT / "web/index.html").read_text(encoding="utf-8")
+    js = (ROOT / "web/static/app.js").read_text(encoding="utf-8")
+
+    assert "/static/app.js?v=12" in html
+    assert 'location.hash.startsWith("#reset=")' in js
+    assert '"/api/auth/reset-password"' in js
+    assert "reset_token" in js
+    assert "设置新密码" in js
+    assert "&& !resetToken" in js
+    assert '$("username-input").disabled = true' in js
+
+
 def test_settings_view_navigation_and_save_wiring():
     html = (ROOT / "web/index.html").read_text(encoding="utf-8")
     js = (ROOT / "web/static/app.js").read_text(encoding="utf-8")
@@ -68,6 +81,18 @@ def test_settings_view_navigation_and_save_wiring():
     assert '"/api/me/password' in js
     assert '"/api/me/sessions/revoke-all' in js
     assert '"/api/me/usage' in js
+    assert 'id="me-identity-tbody"' in html
+    assert 'id="me-identity-bind-code"' in html
+    assert 'id="me-identity-merge"' in html
+    assert '"/api/me/identities"' in js
+    assert '"/api/me/identities/bind-code"' in js
+    assert '"/api/me/identities/merge-preview"' in js
+    assert 'id="me-knowledge-tbody"' in html
+    assert 'id="me-knowledge-file"' in html
+    assert 'id="me-knowledge-url"' in html
+    assert '"/api/me/knowledge"' in js
+    assert '"/api/me/knowledge/upload"' in js
+    assert '"/api/me/knowledge/url"' in js
     # 用户列表身份/账号列与改名
     assert 'identities' in js
     assert "account_username" in js
@@ -102,7 +127,7 @@ def test_restricted_tool_settings_group_is_wired():
     html = (ROOT / "web/index.html").read_text(encoding="utf-8")
     js = (ROOT / "web/static/app.js").read_text(encoding="utf-8")
 
-    assert "/static/app.js?v=11" in html
+    assert "/static/app.js?v=12" in html
     assert 'id="mfa-code-input"' in html
     assert 'id="me-mfa-setup"' in html
     assert 'id="admin-mfa-reset"' in html
@@ -125,3 +150,14 @@ def test_mobile_portrait_layout_keeps_navigation_and_topbar_visible():
     assert "grid-template-columns: minmax(0, 1fr) auto" in css
     assert "scrollbar-width: none" in css
     assert "padding: 14px 12px 48px" in css
+
+
+def test_channel_instance_ui_shows_truthful_lifecycle_metadata_and_refreshes():
+    js = (ROOT / "web/static/app.js").read_text(encoding="utf-8")
+
+    assert "CHANNEL_STATUS_LABELS" in js
+    assert "last_online_at" in js
+    assert "last_error" in js
+    assert "last_checked_at" in js
+    assert "instanceRefreshTimer" in js
+    assert "15000" in js

@@ -1,11 +1,14 @@
-"""媒体消息安全生命周期测试：元数据记录、白名单/大小校验、TTL 清理。"""
+"""媒体消息安全生命周期测试：元数据、加密附件正文、白名单/大小与 TTL。"""
+
+import base64
 
 import pytest
 
 from wecom_ai_gateway import media as media_service
 from wecom_ai_gateway.channels import ChannelMessage
 from wecom_ai_gateway.models import MediaAsset, Message, User
-from wecom_ai_gateway.services import ingest_channel_message
+from wecom_ai_gateway.security import decrypt_secret
+from wecom_ai_gateway.services import _attachment_context, ingest_channel_message
 
 
 def _media_item(**overrides):
@@ -59,6 +62,42 @@ def test_record_media_items_stores_metadata_without_url_exposure(db):
     view = media_service.list_media_metadata(db)
     assert view and "storage_key" not in view[0]
     assert "media_id" not in view[0]
+
+
+def test_inline_media_rechecks_decoded_size_and_records_truthful_size(db, monkeypatch):
+    user = User()
+    db.add(user)
+    db.flush()
+    message = Message(
+        user_id=user.id,
+        channel="wechat_clawbot",
+        external_message_id="media-real-size",
+        direction="inbound",
+        message_type="file",
+        status="ignored",
+    )
+    db.add(message)
+    db.flush()
+    monkeypatch.setattr(media_service.settings, "media_max_size_bytes", 4)
+
+    row = media_service.record_media_items(
+        db,
+        message.id,
+        "wechat_clawbot",
+        [
+            _media_item(
+                media_type="file",
+                mime="text/plain",
+                filename="oversize.txt",
+                size_bytes=1,
+                data_base64=base64.b64encode(b"12345").decode(),
+            )
+        ],
+    )[0]
+
+    assert row.size_bytes == 5
+    assert row.status == "rejected"
+    assert row.rejected_reason == "size_exceeds_limit:4"
 
 
 def test_cleanup_expired_media_removes_only_expired(db):
@@ -116,6 +155,144 @@ def test_generic_channel_ingest_records_media_for_non_text_message(db):
     assert assets[0].media_type == "image"
     # metadata_json 只保留汇总信息，不滞留原始 URL/凭据
     assert "MEDIA_9" not in str(row.metadata_json)
+
+
+def test_clawbot_pdf_is_parsed_encrypted_and_available_to_followup_text(db):
+    import io
+
+    from pypdf import PdfWriter
+
+    pdf = PdfWriter()
+    pdf.add_blank_page(width=100, height=100)
+    buf = io.BytesIO()
+    pdf.write(buf)
+    file_row = ingest_channel_message(
+        db,
+        ChannelMessage(
+            channel="wechat_clawbot",
+            instance_id="instance-doc",
+            sender_id="user-doc",
+            external_message_id="doc-file",
+            message_type="text",
+            content="",
+            media=[
+                {
+                    "media_type": "file",
+                    "mime": "application/pdf",
+                    "filename": "manual.pdf",
+                    "size_bytes": len(buf.getvalue()),
+                    "data_base64": base64.b64encode(buf.getvalue()).decode(),
+                }
+            ],
+            raw={},
+        ),
+    )
+    db.commit()
+
+    assert file_row is not None
+    assert file_row.status == "ignored"
+    asset = db.query(MediaAsset).filter_by(message_id=file_row.id).one()
+    assert asset.content_encrypted is not None
+    assert asset.storage_key is None
+    assert buf.getvalue()[:8].hex() not in str(asset.content_encrypted)
+    assert decrypt_secret(asset.content_encrypted) == ""
+
+
+def test_followup_text_receives_recent_encrypted_attachment_context(db):
+    file_row = ingest_channel_message(
+        db,
+        ChannelMessage(
+            channel="wechat_clawbot",
+            instance_id="instance-doc-context",
+            sender_id="user-doc-context",
+            external_message_id="doc-text-file",
+            message_type="text",
+            content="",
+            media=[
+                {
+                    "media_type": "file",
+                    "mime": "text/plain",
+                    "filename": "manual.txt",
+                    "size_bytes": 30,
+                    "data_base64": base64.b64encode("月光维修口令是银钥匙".encode()).decode(),
+                }
+            ],
+            raw={},
+        ),
+    )
+    followup = ingest_channel_message(
+        db,
+        ChannelMessage(
+            channel="wechat_clawbot",
+            instance_id="instance-doc-context",
+            sender_id="user-doc-context",
+            external_message_id="doc-question",
+            message_type="text",
+            content="总结这个文档",
+            media=[],
+            raw={},
+        ),
+    )
+    db.commit()
+
+    context = _attachment_context(db, followup)
+
+    assert file_row is not None and followup is not None
+    assert file_row.status == "ignored"
+    assert followup.status == "queued"
+    assert "manual.txt" in context
+    assert "月光维修口令是银钥匙" in context
+    assert "不可信附件资料" in context
+
+
+def test_pdf_with_text_is_extracted_then_encrypted(db):
+    """最小合法 PDF fixture 带可提取文本，避免只验证空白 PDF。"""
+    stream = b"BT /F1 12 Tf 72 720 Td (Moon PDF Summary Marker) Tj ET"
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
+        b"<< /Length " + str(len(stream)).encode() + b" >>\nstream\n" + stream + b"\nendstream",
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    ]
+    pdf = bytearray(b"%PDF-1.4\n")
+    offsets = [0]
+    for index, obj in enumerate(objects, 1):
+        offsets.append(len(pdf))
+        pdf.extend(f"{index} 0 obj\n".encode() + obj + b"\nendobj\n")
+    xref = len(pdf)
+    pdf.extend(f"xref\n0 {len(objects) + 1}\n".encode())
+    pdf.extend(b"0000000000 65535 f \n")
+    for offset in offsets[1:]:
+        pdf.extend(f"{offset:010d} 00000 n \n".encode())
+    pdf.extend(
+        f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n".encode()
+    )
+
+    row = ingest_channel_message(
+        db,
+        ChannelMessage(
+            channel="wechat_clawbot",
+            instance_id="instance-pdf-text",
+            sender_id="user-pdf-text",
+            external_message_id="pdf-text-file",
+            content="",
+            media=[
+                {
+                    "media_type": "file",
+                    "mime": "application/pdf",
+                    "filename": "text.pdf",
+                    "size_bytes": len(pdf),
+                    "data_base64": base64.b64encode(pdf).decode(),
+                }
+            ],
+        ),
+    )
+    db.commit()
+
+    asset = db.query(MediaAsset).filter_by(message_id=row.id).one()
+    assert asset.content_encrypted
+    assert "Moon PDF Summary Marker" in decrypt_secret(asset.content_encrypted)
 
 
 # ---------- 出站媒体发送 ----------

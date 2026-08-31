@@ -54,7 +54,7 @@ HELP = """可用命令：
 /clear confirm 清除自己的聊天记录
 /memory on|off|list|add <内容>|delete <序号>|clear confirm 管理私有记忆
 /usage 查看今日用量
-/account 获取后台账号激活链接
+/account 获取后台账号激活链接（已有账号可用 /account reset 找回密码）
 /bind 获取跨渠道绑定码（/bind <码> 完成绑定）
 /kb add|list|delete|search 管理个人知识库"""
 
@@ -376,7 +376,7 @@ def _kb_command(db: Session, user_id: str, parts: list[str]) -> CommandResult:
             return CommandResult(True, "知识库为空。发送 /kb add <标题> <内容> 添加条目。")
         return CommandResult(
             True,
-            "\n".join(f"- {row.title}（{len(row.content)} 字）" for row in rows),
+            "\n".join(f"- {row.title}（{row.content_chars or len(kb_service.item_text(row))} 字）" for row in rows),
         )
     if action == "add" and len(parts) >= 3:
         title_content = parts[2].strip()

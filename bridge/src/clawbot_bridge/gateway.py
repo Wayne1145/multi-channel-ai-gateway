@@ -36,7 +36,6 @@ class GatewayClient:
             "message_type": "text",
             "content": message.content,
             "media": message.media,
-            "raw": message.raw,
         }
         async with httpx.AsyncClient(timeout=self._timeout_seconds) as client:
             response = await client.post(

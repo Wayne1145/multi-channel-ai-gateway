@@ -23,6 +23,9 @@ class FakeRuntime:
     async def stop(self, instance_id: str) -> None:
         self.stopped.append(instance_id)
 
+    def status(self, instance_id: str) -> dict:
+        return {"status": "online", "account_id": "safe-bot@im.bot"}
+
     async def send(
         self, instance_id: str, conversation_id: str, text: str, metadata: dict
     ) -> str:
@@ -78,6 +81,21 @@ def test_bridge_instance_lifecycle_and_message_contract() -> None:
         ("instance-1", "user@im.wechat", "你好", {"reply_to": "incoming-1"})
     ]
     assert runtime.stopped == ["instance-1"]
+
+
+def test_bridge_status_requires_auth_and_returns_public_state() -> None:
+    runtime = FakeRuntime()
+    client = TestClient(create_app(runtime=runtime, bridge_token="bridge-secret"))
+
+    unauthorized = client.get("/instances/instance-1/status")
+    response = client.get(
+        "/instances/instance-1/status",
+        headers={"Authorization": "Bearer bridge-secret"},
+    )
+
+    assert unauthorized.status_code == 401
+    assert response.status_code == 200
+    assert response.json() == {"status": "online", "account_id": "safe-bot@im.bot"}
 
 
 def test_bridge_accepts_media_and_forwards_to_runtime() -> None:

@@ -25,6 +25,18 @@ def register_worker_adapters() -> None:
     register_clawbot_adapter()
 
 
+def migrate_legacy_knowledge() -> int:
+    """启动时把升级前的明文知识条目原地迁入加密分块。"""
+    from .db import SessionLocal
+    from .knowledge import migrate_legacy_items
+
+    db = SessionLocal()
+    try:
+        return migrate_legacy_items(db)
+    finally:
+        db.close()
+
+
 async def execute_task(task) -> None:
     if task.task_type == "sync":
         open_kfid = task.payload.get("open_kfid", "")
@@ -52,6 +64,22 @@ async def execute_task(task) -> None:
                 raise RuntimeError("模型故障错误通知投递失败")
         finally:
             db.close()
+        return
+    if task.task_type == "alert":
+        from .alert import send_alert
+
+        payload = task.payload or {}
+        kind = payload.get("kind")
+        name = str(payload.get("instance_name") or "未命名实例")[:120]
+        label = "渠道已恢复" if kind == "channel_recovered" else "渠道连接异常"
+        body = (
+            f"instance={name}\n"
+            f"channel={str(payload.get('channel') or 'wechat_clawbot')[:40]}\n"
+            f"transition={str(payload.get('old_status') or '')[:20]}"
+            f"->{str(payload.get('new_status') or '')[:20]}\n"
+            f"error={str(payload.get('error') or '')[:120]}"
+        )
+        await asyncio.to_thread(send_alert, f"[{settings.app_name}] {label}：{name}", body)
         return
     raise ValueError(f"未知任务类型：{task.task_type}")
 
@@ -93,10 +121,32 @@ async def drain_available_tasks() -> int:
     return processed
 
 
+async def channel_reconcile_loop(interval_seconds: float = 30.0) -> None:
+    """独立运行渠道状态对账，绝不阻塞 Outbox 消费主循环。"""
+    from .channel_health import reconcile_all_channel_instances
+    from .db import SessionLocal
+
+    while True:
+        db = SessionLocal()
+        try:
+            await reconcile_all_channel_instances(db)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("渠道实例状态对账失败")
+        finally:
+            db.close()
+        await asyncio.sleep(interval_seconds)
+
+
 async def main():
     register_worker_adapters()
+    migrated = await asyncio.to_thread(migrate_legacy_knowledge)
+    if migrated:
+        log.info("已将 %s 条旧知识库明文迁移为加密分块", migrated)
     r = redis_client()
     log.info("任务 Worker 已启动（持久化 Outbox 模式）")
+    asyncio.create_task(channel_reconcile_loop())
     last_reconcile = 0.0
     last_media_cleanup = 0.0
     last_retention_cleanup = 0.0
@@ -107,6 +157,7 @@ async def main():
             if repaired:
                 log.warning("补偿创建了 %s 个消息任务", repaired)
             last_reconcile = now
+
         if now - last_media_cleanup >= 3600:
             from .db import SessionLocal
 

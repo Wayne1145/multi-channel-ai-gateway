@@ -57,6 +57,28 @@ async def test_clawbot_adapter_uses_env_bridge_token_without_persisting_it(monke
     assert route.calls[0].request.headers["authorization"] == "Bearer test-bridge-token"
 
 
+@pytest.mark.anyio
+async def test_clawbot_adapter_reads_live_instance_status(monkeypatch):
+    monkeypatch.setattr(settings, "clawbot_bridge_token", "test-bridge-token")
+    adapter = ClawBotAdapter("https://bridge.example")
+    with respx.mock(assert_all_called=True) as router:
+        route = router.get("https://bridge.example/instances/instance-1/status").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "status": "online",
+                    "account_id": "bot@im.bot",
+                    "bot_token": "must-never-be-returned",
+                },
+            )
+        )
+        status = await adapter.instance_status("instance-1")
+
+    assert route.calls[0].request.headers["authorization"] == "Bearer test-bridge-token"
+    assert status == {"status": "online", "account_id": "bot@im.bot"}
+    assert "must-never-be-returned" not in str(status)
+
+
 def test_clawbot_adapter_rejects_bridge_url_with_credentials():
     with pytest.raises(ValueError, match="不得包含查询参数"):
         ClawBotAdapter("https://bridge.example?access_token=never-leak")

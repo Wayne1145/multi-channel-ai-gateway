@@ -1,3 +1,4 @@
+import base64
 import json
 import logging
 
@@ -70,6 +71,90 @@ def test_parse_inbound_text_prefers_client_id_as_external_id() -> None:
 def test_parse_inbound_text_ignores_non_user_or_empty_messages() -> None:
     assert parse_inbound_text({"message_type": 2, "item_list": []}) is None
     assert parse_inbound_text({"message_type": 1, "item_list": []}) is None
+
+
+@pytest.mark.anyio
+async def test_ilink_downloads_and_decrypts_inbound_pdf_without_exposing_cdn_credentials() -> None:
+    key = b"0123456789abcdef"
+    plaintext = b"%PDF-1.7 safe fixture"
+    # iLink 文件密钥有时是 base64(32 位 hex 文本)，需要兼容两层编码。
+    encoded_key = base64.b64encode(key.hex().encode()).decode()
+    client = ILinkClient(ILinkCredentials("bot-secret", "https://ilinkai.weixin.qq.com"))
+    encrypted = __import__("clawbot_bridge.ilink", fromlist=["_aes_ecb_encrypt"])._aes_ecb_encrypt(
+        plaintext, key
+    )
+    raw = {
+        "from_user_id": "user@im.wechat",
+        "client_id": "file-message-1",
+        "message_type": 1,
+        "context_token": "context-file",
+        "item_list": [
+            {
+                "type": 4,
+                "file_item": {
+                    "file_name": "guide.pdf",
+                    "len": str(len(plaintext)),
+                    "media": {
+                        "encrypt_query_param": "must-not-leak-query",
+                        "aes_key": encoded_key,
+                    },
+                },
+            }
+        ],
+    }
+
+    with respx.mock(assert_all_called=True) as router:
+        router.get(
+            "https://novac2c.cdn.weixin.qq.com/c2c/download",
+            params={"encrypted_query_param": "must-not-leak-query"},
+        ).mock(return_value=httpx.Response(200, content=encrypted))
+        parsed = await client.parse_inbound(raw)
+
+    assert parsed is not None
+    assert parsed.content == ""
+    assert parsed.media == [
+        {
+            "media_type": "file",
+            "mime": "application/pdf",
+            "filename": "guide.pdf",
+            "size_bytes": len(plaintext),
+            "data_base64": base64.b64encode(plaintext).decode(),
+        }
+    ]
+    assert "must-not-leak-query" not in str(parsed.media)
+    assert encoded_key not in str(parsed.media)
+
+
+@pytest.mark.anyio
+async def test_ilink_rejects_oversize_inbound_file_before_download() -> None:
+    client = ILinkClient(ILinkCredentials("bot-secret", "https://ilinkai.weixin.qq.com"))
+    raw = {
+        "from_user_id": "user@im.wechat",
+        "client_id": "file-message-large",
+        "message_type": 1,
+        "context_token": "context-file",
+        "item_list": [
+            {
+                "type": 4,
+                "file_item": {
+                    "file_name": "huge.pdf",
+                    "len": str(11 * 1024 * 1024),
+                    "media": {
+                        "encrypt_query_param": "large-query",
+                        "aes_key": base64.b64encode(b"0123456789abcdef").decode(),
+                    },
+                },
+            }
+        ],
+    }
+
+    with respx.mock(assert_all_mocked=True) as router:
+        parsed = await client.parse_inbound(raw)
+
+    assert parsed is not None
+    assert parsed.media[0]["status"] == "rejected"
+    assert parsed.media[0]["rejected_reason"] == "size_exceeds_limit"
+    assert not router.calls
 
 
 @pytest.mark.anyio

@@ -1,4 +1,7 @@
-# WeCom AI Gateway
+# Multi-Channel AI Gateway
+
+[![CI](https://github.com/Wayne1145/multi-channel-ai-gateway/actions/workflows/ci.yml/badge.svg)](https://github.com/Wayne1145/multi-channel-ai-gateway/actions/workflows/ci.yml)
+[![License](https://img.shields.io/github/license/Wayne1145/multi-channel-ai-gateway)](LICENSE)
 
 一个面向企业微信「微信客服」的独立、多用户大模型网关。普通微信用户通过同一个客服入口聊天，但每个人拥有隔离的会话、模型、人设、参数和长期记忆。
 
@@ -30,6 +33,10 @@
 - 管理 API 与 Apple 风格管理后台：双角色账号中心、用户管理（渠道身份脱敏/显示名/封禁/模式/模型组）、模型路由、平台设置、审计日志、渠道实例、死信重放
 - Docker Compose / 1Panel 友好部署
 - 可选 `wechat_clawbot` Bridge：仓库内置可独立部署的 iLink 桥接，文本与媒体收发（CDN AES 加密上传），多实例会话加密隔离；登录凭据由 Bridge 保管，网关仅处理规范化消息
+- ClawBot 状态闭环：实时状态对账、二维码过期自动换码、瞬时断线退避重连、最后在线/错误时间、故障与恢复告警、72 小时脱敏长稳监测
+- 微信可信身份自助找回：已有账号发送 `/account reset` 获取 15 分钟一次性 fragment 重置链接，旧会话撤销且保留 MFA
+- 用户渠道身份中心：脱敏身份列表、高熵一次性绑定令牌、密码保护的合并预览/确认及安全解绑
+- 加密混合 RAG：TXT/Markdown/HTML/PDF/DOCX/公开 HTTPS 文档导入，本地带密钥特征向量 + PostgreSQL pgvector + 词法融合，回答保留来源引用
 
 > 当前版本是 **0.3.0-dev 可靠任务与多渠道基础**，并非最初路线图的全部功能。已实现、已验证与尚未实现的明确边界见 [项目状态与路线图](docs/project-status.md)。个人微信渠道存在平台规则与账号风险，默认保持禁用；生产使用前建议完成压力与故障测试。
 
@@ -52,6 +59,7 @@
 /memory list
 /usage
 /account
+/account reset
 /bind
 ```
 
@@ -64,6 +72,8 @@
 因此原有会话、角色卡、记忆和用量不会分裂成另一个用户。激活令牌放在 URL fragment
 中且数据库只保存 SHA-256 摘要；页面读取后会立即从地址栏移除。已有账号的用户再次
 发送 `/account` 时只会收到登录地址和现有用户名，不会重签激活令牌。
+
+已有账号忘记密码时，可在同一可信微信身份发送 `/account reset`。重置链接同样只存摘要、15 分钟有效且单次消费；完成后所有旧网页登录会话和未完成 MFA 挑战都会撤销，但已启用的 MFA 不会被关闭，用户必须用新密码按正常登录流程完成二次验证。
 
 ## 快速部署
 
@@ -83,7 +93,7 @@ sudo chmod 700 data/clawbot-bridge
 docker compose --profile clawbot up -d --build
 ```
 
-Bridge 当前完成文本收发；图片、语音、视频与文件仍未实现。详见 [Bridge 文档](bridge/README.md)。
+Bridge 已实现文本、图片、语音、视频与文件协议管线；真实渠道能力仍受微信/iLink 账号与上下文限制。详见 [Bridge 文档](bridge/README.md)。
 
 企业微信后台回调 URL：
 
@@ -128,7 +138,7 @@ python3 -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().
 ```bash
 uv sync --extra dev
 uv run pytest
-uv run ruff check src tests
+uv run ruff check src tests migrations
 ```
 
 ## 持续集成

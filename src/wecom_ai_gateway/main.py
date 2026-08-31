@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import logging
 from datetime import UTC, datetime, timedelta
@@ -7,11 +8,12 @@ from time import perf_counter
 from typing import Literal
 from urllib.parse import urlsplit
 
+import httpx
 import qrcode
-from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, Response, UploadFile
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from qrcode.image.svg import SvgPathImage
 from sqlalchemy import delete, func, or_, select
 from sqlalchemy.exc import IntegrityError
@@ -243,6 +245,12 @@ class AccountActivationIn(LoginIn):
     confirm_password: str
 
 
+class PasswordResetIn(BaseModel):
+    reset_token: str
+    password: str
+    confirm_password: str
+
+
 @app.get("/api/auth/config")
 def auth_config(db: Session = Depends(db_dep)):
     return {
@@ -418,6 +426,34 @@ def auth_activate(body: AccountActivationIn, db: Session = Depends(db_dep)):
         "user_id": account.user_id,
         "username": account.username,
     }
+
+
+@app.post("/api/auth/reset-password")
+def auth_reset_password(body: PasswordResetIn, db: Session = Depends(db_dep)):
+    """消费微信可信渠道签发的重置凭证；重置后必须按正常流程登录/MFA。"""
+    if body.password != body.confirm_password:
+        raise HTTPException(400, "两次输入的密码不一致")
+    from .password_reset import PasswordResetError, consume_password_reset
+
+    try:
+        account = consume_password_reset(
+            db,
+            body.reset_token,
+            body.password,
+            password_min_length=int(get_runtime_value(db, "password_min_length")),
+        )
+    except (PasswordResetError, ValueError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+    mfa_preserved = bool(enabled_credential(db, account_subject(account)))
+    db.add(
+        AuditLog(
+            user_id=account.user_id,
+            action="account.password_reset",
+            detail={"username": account.username, "mfa_preserved": mfa_preserved},
+        )
+    )
+    db.commit()
+    return {"ok": True, "username": account.username, "mfa_preserved": mfa_preserved}
 
 
 @app.post("/api/auth/logout")
@@ -1135,6 +1171,303 @@ def _user_settings_for(db: Session, user_id: str) -> UserSettings:
         db.add(row)
         db.flush()
     return row
+
+
+class KnowledgeUrlIn(BaseModel):
+    title: str
+    url: str
+
+
+class IdentityMergePreviewIn(BaseModel):
+    code: str
+    password: str
+
+
+class IdentityMergeIn(IdentityMergePreviewIn):
+    password: str
+    confirm: str
+
+
+class IdentityUnbindIn(BaseModel):
+    password: str
+    confirm: str
+
+
+@app.get("/api/me/knowledge")
+def my_knowledge(
+    principal: Principal = Depends(current_user), db: Session = Depends(db_dep)
+):
+    assert principal.user_id is not None
+    from .knowledge import list_items
+
+    return [
+        {
+            "id": row.id,
+            "title": row.title,
+            "source_type": row.source_type,
+            "source_name": row.source_name,
+            "source_url": row.source_url,
+            "mime_type": row.mime_type,
+            "content_chars": row.content_chars,
+            "indexed_at": row.indexed_at,
+            "created_at": row.created_at,
+            "updated_at": row.updated_at,
+        }
+        for row in list_items(db, principal.user_id)
+    ]
+
+
+@app.post("/api/me/knowledge/upload")
+async def my_knowledge_upload(
+    title: str = Form(...),
+    file: UploadFile = File(...),
+    principal: Principal = Depends(current_user),
+    db: Session = Depends(db_dep),
+):
+    assert principal.user_id is not None
+    from .knowledge import add_item, extract_document_text_isolated
+
+    data = await file.read(10 * 1024 * 1024 + 1)
+    try:
+        content = await asyncio.to_thread(
+            extract_document_text_isolated,
+            data,
+            file.content_type or "",
+            file.filename or "",
+        )
+        if not content:
+            raise ValueError("文档中没有可提取的文本")
+        row = add_item(
+            db,
+            principal.user_id,
+            title,
+            content,
+            source_type=(file.filename or "file").rsplit(".", 1)[-1].lower(),
+            source_name=file.filename or title,
+            mime_type=file.content_type,
+            chunk_chars=int(get_runtime_value(db, "kb_chunk_chars")),
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"ok": True, "id": row.id, "title": row.title}
+
+
+@app.post("/api/me/knowledge/url")
+async def my_knowledge_url(
+    body: KnowledgeUrlIn,
+    principal: Principal = Depends(current_user),
+    db: Session = Depends(db_dep),
+):
+    assert principal.user_id is not None
+    from .knowledge import add_item, extract_document_text_isolated, fetch_public_document
+
+    try:
+        data, mime, safe_url = await fetch_public_document(body.url)
+        content = await asyncio.to_thread(extract_document_text_isolated, data, mime, safe_url)
+        if not content:
+            raise ValueError("网址中没有可提取的文本")
+        row = add_item(
+            db,
+            principal.user_id,
+            body.title,
+            content,
+            source_type="url",
+            source_name=urlsplit(safe_url).hostname or body.title,
+            source_url=safe_url,
+            mime_type=mime,
+            chunk_chars=int(get_runtime_value(db, "kb_chunk_chars")),
+        )
+    except (ValueError, httpx.HTTPError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"ok": True, "id": row.id, "title": row.title}
+
+
+@app.get("/api/me/knowledge/search")
+def my_knowledge_search(
+    q: str,
+    principal: Principal = Depends(current_user),
+    db: Session = Depends(db_dep),
+):
+    assert principal.user_id is not None
+    from .knowledge import search
+
+    return search(
+        db,
+        principal.user_id,
+        q,
+        limit=int(get_runtime_value(db, "kb_max_chunks")),
+        chunk_chars=int(get_runtime_value(db, "kb_chunk_chars")),
+    )
+
+
+@app.post("/api/me/knowledge/{item_id}/reindex")
+def my_knowledge_reindex(
+    item_id: str,
+    principal: Principal = Depends(current_user),
+    db: Session = Depends(db_dep),
+):
+    assert principal.user_id is not None
+    from .knowledge import reindex_item
+
+    if not reindex_item(
+        db,
+        principal.user_id,
+        item_id,
+        chunk_chars=int(get_runtime_value(db, "kb_chunk_chars")),
+    ):
+        raise HTTPException(404, "knowledge item not found")
+    return {"ok": True}
+
+
+@app.delete("/api/me/knowledge/{item_id}")
+def my_knowledge_delete(
+    item_id: str,
+    principal: Principal = Depends(current_user),
+    db: Session = Depends(db_dep),
+):
+    assert principal.user_id is not None
+    from .knowledge import delete_item_by_id
+
+    if not delete_item_by_id(db, principal.user_id, item_id):
+        raise HTTPException(404, "knowledge item not found")
+    return {"ok": True}
+
+
+@app.get("/api/me/identities")
+def my_identities(
+    principal: Principal = Depends(current_user), db: Session = Depends(db_dep)
+):
+    assert principal.user_id is not None
+    rows = db.scalars(
+        select(ChannelIdentity)
+        .where(ChannelIdentity.user_id == principal.user_id)
+        .order_by(ChannelIdentity.created_at)
+    )
+    result = []
+    for row in rows:
+        try:
+            masked = _mask_external_id(decrypt_secret(row.external_id_encrypted))
+        except Exception:  # noqa: BLE001 - 密钥异常时仍返回安全占位
+            masked = "不可读取"
+        result.append(
+            {
+                "id": row.id,
+                "user_id": row.user_id,
+                "channel": row.channel,
+                "account_id": row.account_id,
+                "masked_external_id": masked,
+                "created_at": row.created_at,
+                "last_seen_at": row.last_seen_at,
+            }
+        )
+    return result
+
+
+@app.post("/api/me/identities/bind-code")
+def my_identity_bind_code(
+    principal: Principal = Depends(current_user), db: Session = Depends(db_dep)
+):
+    assert principal.user_id is not None
+    from .binding import create_bind_code
+
+    return {"code": create_bind_code(db, principal.user_id), "expires_in_seconds": 600}
+
+
+@app.post("/api/me/identities/merge-preview")
+def my_identity_merge_preview(
+    body: IdentityMergePreviewIn,
+    principal: Principal = Depends(current_user),
+    db: Session = Depends(db_dep),
+):
+    assert principal.user_id is not None
+    account = db.scalar(
+        select(Account).where(Account.user_id == principal.user_id, Account.is_active.is_(True))
+    )
+    from .security import verify_password
+
+    if not account or not verify_password(body.password, account.password_hash):
+        raise HTTPException(400, "当前密码不正确")
+    from .binding import merge_preview
+
+    try:
+        return merge_preview(db, body.code, target_user_id=principal.user_id)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.post("/api/me/identities/merge")
+def my_identity_merge(
+    body: IdentityMergeIn,
+    principal: Principal = Depends(current_user),
+    db: Session = Depends(db_dep),
+):
+    assert principal.user_id is not None
+    if body.confirm != "MERGE":
+        raise HTTPException(400, "请输入 MERGE 确认合并")
+    account = db.scalar(
+        select(Account).where(Account.user_id == principal.user_id, Account.is_active.is_(True))
+    )
+    from .security import verify_password
+
+    if not account or not verify_password(body.password, account.password_hash):
+        raise HTTPException(400, "当前密码不正确")
+    from .binding import merge_by_code
+
+    try:
+        result = merge_by_code(db, body.code, target_user_id=principal.user_id)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    db.add(
+        AuditLog(
+            user_id=principal.user_id,
+            action="identity.merge",
+            detail={"counts": result["stats"]},
+        )
+    )
+    db.commit()
+    return result
+
+
+@app.post("/api/me/identities/{identity_id}/unbind")
+def my_identity_unbind(
+    identity_id: str,
+    body: IdentityUnbindIn,
+    principal: Principal = Depends(current_user),
+    db: Session = Depends(db_dep),
+):
+    assert principal.user_id is not None
+    if body.confirm != "UNBIND":
+        raise HTTPException(400, "请输入 UNBIND 确认解绑")
+    account = db.scalar(
+        select(Account).where(Account.user_id == principal.user_id, Account.is_active.is_(True))
+    )
+    from .security import verify_password
+
+    if not account or not verify_password(body.password, account.password_hash):
+        raise HTTPException(400, "当前密码不正确")
+    # 锁住用户行与身份集合，在同一事务中计数并删除，防止并发解绑最后两个身份。
+    db.scalar(select(User).where(User.id == principal.user_id).with_for_update())
+    identities = list(
+        db.scalars(
+            select(ChannelIdentity)
+            .where(ChannelIdentity.user_id == principal.user_id)
+            .with_for_update()
+        )
+    )
+    identity = next((row for row in identities if row.id == identity_id), None)
+    if not identity:
+        raise HTTPException(404, "identity not found")
+    if identity.channel == "wechat_clawbot":
+        instance = db.get(ChannelInstance, identity.account_id)
+        if instance and instance.status in {"online", "logging_in", "reconnecting"}:
+            raise HTTPException(409, "请先停止对应的微信实例再解绑")
+    if len(identities) <= 1:
+        raise HTTPException(409, "至少需要保留一个渠道身份")
+    detail = {"channel": identity.channel, "account_id": identity.account_id}
+    db.delete(identity)
+    db.add(AuditLog(user_id=principal.user_id, action="identity.unbind", detail=detail))
+    db.commit()
+    return {"ok": True}
 
 
 @app.get("/api/me/cards")
@@ -1919,6 +2252,8 @@ class ChannelInstanceIn(BaseModel):
 class ChannelMessageIn(BaseModel):
     """桥接服务投递的规范化入站消息；端点只面向受保护的内部网络。"""
 
+    model_config = ConfigDict(extra="forbid")
+
     sender_id: str
     external_message_id: str
     message_type: str = "text"
@@ -1947,6 +2282,11 @@ def _channel_instance_view(instance: ChannelInstance) -> dict:
         "config": instance.config,
         "created_at": instance.created_at,
         "updated_at": instance.updated_at,
+        "status_updated_at": instance.status_updated_at,
+        "last_checked_at": instance.last_checked_at,
+        "last_online_at": instance.last_online_at,
+        "last_error_at": instance.last_error_at,
+        "last_error": instance.last_error,
     }
     safe_login = {
         key: value
@@ -2001,6 +2341,7 @@ async def _change_channel_instance_status(instance_id: str, action: Literal["sta
         try:
             adapter = registry.get(instance.channel)
             if action == "start":
+                instance.desired_running = True
                 instance.status = "logging_in"
                 db.commit()
                 bridge_state = await adapter.start_instance(instance.id)
@@ -2015,6 +2356,7 @@ async def _change_channel_instance_status(instance_id: str, action: Literal["sta
                 )
             else:
                 await adapter.stop_instance(instance.id)
+                instance.desired_running = False
                 instance.status = "offline"
                 instance.login_state = {}
             db.commit()
@@ -2022,6 +2364,8 @@ async def _change_channel_instance_status(instance_id: str, action: Literal["sta
             db.rollback()
             instance = db.get(ChannelInstance, instance_id)
             if instance:
+                if action == "start":
+                    instance.desired_running = True
                 instance.status = "error"
                 db.commit()
             log.error(
@@ -2201,8 +2545,9 @@ def receive_channel_status(instance_id: str, body: ChannelStatusIn, db: Session 
         parsed = urlsplit(qrcode_url)
         if parsed.scheme != "https" or not parsed.netloc or parsed.username or parsed.password:
             state.pop("qrcode_url", None)
-    instance.login_state = state
-    instance.status = "logging_in" if body.status == "pending_login" else body.status
+    from .channel_health import apply_channel_status
+
+    apply_channel_status(db, instance, state)
     db.commit()
     db.refresh(instance)
     return _channel_instance_view(instance)

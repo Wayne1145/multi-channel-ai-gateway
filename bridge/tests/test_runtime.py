@@ -4,7 +4,12 @@ from pathlib import Path
 import pytest
 
 from clawbot_bridge.gateway import GatewayClient
-from clawbot_bridge.ilink import ILinkCredentials, ParsedInboundText, SessionExpiredError
+from clawbot_bridge.ilink import (
+    ILinkCredentials,
+    LoginQrExpiredError,
+    ParsedInboundText,
+    SessionExpiredError,
+)
 from clawbot_bridge.runtime import BridgeRuntime, LoginPending, LoginSuccess
 from clawbot_bridge.state import EncryptedStateStore, StoredInstanceState
 
@@ -165,6 +170,161 @@ async def test_runtime_reports_login_failure_without_sensitive_details() -> None
 
 
 @pytest.mark.anyio
+async def test_restored_runtime_reports_sanitized_error_status_to_gateway(tmp_path: Path) -> None:
+    class FailingMonitor(FakeMonitor):
+        async def monitor(self, instance_id, credentials, on_message, stop_event) -> None:
+            raise RuntimeError("failed bot_token=must-never-leak")
+
+    store = EncryptedStateStore(tmp_path, "bridge-secret-at-least-16")
+    store.save(
+        "instance-restored-error",
+        StoredInstanceState(
+            credentials=ILinkCredentials("stored-token", "https://ilinkai.weixin.qq.com"),
+            account_id="stored-bot@im.bot",
+            context_tokens={},
+        ),
+    )
+    gateway = FakeGateway()
+    runtime = BridgeRuntime(
+        login_provider=FakeLoginProvider(),
+        gateway=gateway,
+        ilink=FailingMonitor(),
+        state_store=store,
+    )
+
+    await runtime.start("instance-restored-error")
+    await asyncio.sleep(0.05)
+
+    assert runtime.status("instance-restored-error")["error"] == "RuntimeError"
+    assert gateway.statuses[-1][:2] == ("instance-restored-error", "error")
+
+
+@pytest.mark.anyio
+async def test_restored_runtime_retries_initial_gateway_status_until_api_is_ready(tmp_path: Path) -> None:
+    class StartingGateway(FakeGateway):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls = 0
+
+        async def report_status(self, *args, **kwargs) -> None:
+            self.calls += 1
+            if self.calls == 1:
+                raise ConnectionError("api starting")
+            await super().report_status(*args, **kwargs)
+
+    store = EncryptedStateStore(tmp_path, "bridge-secret-at-least-16")
+    store.save(
+        "instance-startup-race",
+        StoredInstanceState(
+            credentials=ILinkCredentials("stored-token", "https://ilinkai.weixin.qq.com"),
+            account_id="stored-bot@im.bot",
+            context_tokens={},
+        ),
+    )
+    gateway = StartingGateway()
+    monitor = FakeMonitor()
+    runtime = BridgeRuntime(
+        login_provider=FakeLoginProvider(),
+        gateway=gateway,
+        ilink=monitor,
+        state_store=store,
+    )
+
+    await runtime.start("instance-startup-race")
+    await asyncio.wait_for(monitor.started.wait(), timeout=2)
+    for _ in range(20):
+        if gateway.calls >= 2:
+            break
+        await asyncio.sleep(0.05)
+
+    assert gateway.calls >= 2
+    assert runtime.status("instance-startup-race")["status"] == "online"
+    assert gateway.statuses[-1][:2] == ("instance-startup-race", "online")
+    await runtime.stop("instance-startup-race")
+
+
+@pytest.mark.anyio
+async def test_restored_runtime_monitors_even_when_gateway_status_callback_stays_down(
+    tmp_path: Path,
+) -> None:
+    class DownGateway(FakeGateway):
+        async def report_status(self, *args, **kwargs) -> None:
+            raise ConnectionError("api unavailable")
+
+    store = EncryptedStateStore(tmp_path, "bridge-secret-at-least-16")
+    store.save(
+        "instance-callback-down",
+        StoredInstanceState(
+            credentials=ILinkCredentials("stored-token", "https://ilinkai.weixin.qq.com"),
+            account_id="stored-bot@im.bot",
+            context_tokens={},
+        ),
+    )
+    monitor = FakeMonitor()
+    runtime = BridgeRuntime(
+        login_provider=FakeLoginProvider(),
+        gateway=DownGateway(),
+        ilink=monitor,
+        state_store=store,
+    )
+
+    await runtime.start("instance-callback-down")
+    await asyncio.wait_for(monitor.started.wait(), timeout=0.5)
+
+    assert runtime.status("instance-callback-down")["status"] == "online"
+    await runtime.stop("instance-callback-down")
+
+
+@pytest.mark.anyio
+async def test_expired_restored_session_cancels_stale_online_report(tmp_path: Path) -> None:
+    class RecordingDownGateway(FakeGateway):
+        def __init__(self) -> None:
+            super().__init__()
+            self.online_attempts = 0
+
+        async def report_status(self, instance_id: str, *, status: str, **kwargs) -> None:
+            if status == "online":
+                self.online_attempts += 1
+                raise ConnectionError("api unavailable")
+            await super().report_status(instance_id, status=status, **kwargs)
+
+    class ExpiredMonitor(FakeMonitor):
+        async def monitor(self, instance_id, credentials, on_message, stop_event) -> None:
+            await asyncio.sleep(0.02)
+            raise SessionExpiredError("expired")
+
+    class WaitingLogin(FakeLoginProvider):
+        async def wait_login(self, pending: LoginPending) -> LoginSuccess:
+            await asyncio.Event().wait()
+
+    store = EncryptedStateStore(tmp_path, "bridge-secret-at-least-16")
+    store.save(
+        "instance-stale-report",
+        StoredInstanceState(
+            credentials=ILinkCredentials("stored-token", "https://ilinkai.weixin.qq.com"),
+            account_id="stored-bot@im.bot",
+            context_tokens={},
+        ),
+    )
+    gateway = RecordingDownGateway()
+    runtime = BridgeRuntime(
+        login_provider=WaitingLogin(),
+        gateway=gateway,
+        ilink=ExpiredMonitor(),
+        state_store=store,
+    )
+
+    await runtime.start("instance-stale-report")
+    await asyncio.sleep(0.2)
+    attempts_after_rotation = gateway.online_attempts
+    await asyncio.sleep(1.1)
+
+    assert runtime.status("instance-stale-report")["status"] == "pending_login"
+    assert gateway.online_attempts == attempts_after_rotation
+    await runtime.stop("instance-stale-report")
+
+
+@pytest.mark.anyio
 async def test_runtime_session_expiry_returns_to_pending_login() -> None:
     class RotatingLogin(FakeLoginProvider):
         def __init__(self) -> None:
@@ -220,6 +380,88 @@ async def test_runtime_session_expiry_returns_to_pending_login() -> None:
     assert runtime.status("instance-expired")["status"] == "online"
     assert monitor.calls == 2
     await runtime.stop("instance-expired")
+
+
+@pytest.mark.anyio
+async def test_runtime_rotates_expired_login_qrcode_without_entering_error() -> None:
+    class ExpiringLogin(FakeLoginProvider):
+        def __init__(self) -> None:
+            super().__init__()
+            self.starts = 0
+            self.fresh_login = asyncio.Event()
+
+        async def start_login(self) -> LoginPending:
+            self.starts += 1
+            return LoginPending(
+                session_key=f"login-{self.starts}",
+                qrcode_url=f"https://qr.example/{self.starts}",
+            )
+
+        async def wait_login(self, pending: LoginPending) -> LoginSuccess:
+            if pending.session_key == "login-1":
+                raise LoginQrExpiredError("expired")
+            await self.fresh_login.wait()
+            return LoginSuccess(
+                bot_token="private-token",
+                base_url="https://ilinkai.weixin.qq.com",
+                account_id="bot@im.bot",
+            )
+
+    login = ExpiringLogin()
+    gateway = FakeGateway()
+    runtime = BridgeRuntime(
+        login_provider=login,
+        gateway=gateway,
+        ilink=FakeMonitor(),
+    )
+
+    first = await runtime.start("instance-rotate")
+    await asyncio.sleep(0.05)
+
+    assert first["qrcode_url"] == "https://qr.example/1"
+    assert login.starts == 2
+    assert runtime.status("instance-rotate") == {
+        "status": "pending_login",
+        "qrcode_url": "https://qr.example/2",
+    }
+    assert gateway.statuses[-1][:2] == ("instance-rotate", "pending_login")
+    assert all(status != "error" for _, status, _ in gateway.statuses)
+    await runtime.stop("instance-rotate")
+
+
+@pytest.mark.anyio
+async def test_runtime_continues_waiting_for_rotated_qrcode_when_status_callback_fails() -> None:
+    class ExpiringLogin(FakeLoginProvider):
+        def __init__(self) -> None:
+            super().__init__()
+            self.starts = 0
+            self.second_wait_started = asyncio.Event()
+
+        async def start_login(self) -> LoginPending:
+            self.starts += 1
+            return LoginPending(
+                session_key=f"login-{self.starts}", qrcode_url=f"https://qr.example/{self.starts}"
+            )
+
+        async def wait_login(self, pending: LoginPending) -> LoginSuccess:
+            if pending.session_key == "login-1":
+                raise LoginQrExpiredError("expired")
+            self.second_wait_started.set()
+            await asyncio.Event().wait()
+
+    class DownGateway(FakeGateway):
+        async def report_status(self, *args, **kwargs) -> None:
+            raise ConnectionError("api unavailable")
+
+    login = ExpiringLogin()
+    runtime = BridgeRuntime(login_provider=login, gateway=DownGateway(), ilink=FakeMonitor())
+
+    await runtime.start("instance-rotate-callback-down")
+    await asyncio.wait_for(login.second_wait_started.wait(), timeout=0.5)
+
+    assert runtime.status("instance-rotate-callback-down")["status"] == "pending_login"
+    assert login.starts == 2
+    await runtime.stop("instance-rotate-callback-down")
 
 
 @pytest.mark.anyio

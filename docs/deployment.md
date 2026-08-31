@@ -33,7 +33,7 @@ http://127.0.0.1:18082
 `{status: "online", account_id: "..."}`，网关才会接受该实例的入站消息。
 
 公开仓库只包含渠道抽象和上述 HTTP 契约；具体个人微信协议运行时应独立部署并自行承担平台合规与可用性风险。
-5. 桥接服务应实现三个端点：`POST /instances/{id}/start`、`/stop`、`/messages`。出站文本字段为 `conversationId` 与 `text`。
+5. 桥接服务应实现 `POST /instances/{id}/start`、`/stop`、`/messages` 和受 Bearer 保护的 `GET /instances/{id}/status`。出站文本字段为 `conversationId` 与 `text`。
 
 桥接令牌、扫码会话、Cookie 和个人微信凭据只允许保存在桥接服务的受保护存储中，绝不可写入网关的渠道实例配置、数据库、日志或 Git。
 
@@ -94,3 +94,28 @@ Bridge 启动时会扫描每个实例目录的 `session.encrypted`，恢复有�
 不要把 `data/clawbot-bridge/`、`.env`、二维码临时链接、token 或游标提交到仓库。
 
 API 容器启动时会先执行 `alembic upgrade head`。禁止通过删除数据目录解决升级问题。
+
+## 0016–0019 升级说明
+
+- PostgreSQL 镜像必须包含 pgvector；仓库默认使用 `pgvector/pgvector:pg16`。
+- 新数据库由 `docker/postgres-init/001-pgvector.sql` 在初始化阶段安装扩展；已有数据库升级前应由管理员确认 `SELECT extname FROM pg_extension WHERE extname='vector'` 有结果。
+- 迁移会启用 `vector` 扩展，新增渠道状态时间戳、密码重置表和 `knowledge_chunks.vector(256)`。
+- `0017` 将用户运行意图 `desired_running` 与实时 `status` 分离，避免网络离线被误判为主动停止。
+- `0018` 为 ClawBot 入站文档增加加密提取文本；Bridge 只接受 PDF/TXT/Markdown/HTML/DOCX 且限制 10MB，API 不保存原始文件或 CDN 凭据。
+- `0019` 清除旧 6 位短绑定码并扩展为 128 位高熵一次性令牌，避免在线枚举。
+- Worker 启动后会把旧版知识库明文条目迁移为密文分块；升级前必须先完成 PostgreSQL 逻辑备份。
+- `/account reset`、身份合并和解绑均依赖可信微信身份或当前密码；不要开放绕过这些校验的反代规则。
+- 前端文件上传默认限制 10MB，只支持 TXT/Markdown/HTML/PDF/DOCX；URL 导入只接受无凭据公网 HTTPS，拒绝重定向，并固定已校验 IP 防止 DNS 重绑定。
+
+启动 72 小时脱敏长稳监测：
+
+```bash
+mkdir -p logs
+docker compose run -d --no-deps \
+  --name wecom-ai-gateway-clawbot-soak \
+  --entrypoint python worker -m wecom_ai_gateway.soak \
+  --duration-hours 72 --interval-seconds 30 --unhealthy-grace-seconds 300
+docker logs -f wecom-ai-gateway-clawbot-soak
+```
+
+采样只包含实例 UUID、显示名称、公开状态和错误类型，不包含 bot token、context token、二维码 URL 或用户消息。
